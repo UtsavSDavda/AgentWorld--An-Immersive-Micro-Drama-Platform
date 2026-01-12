@@ -1,0 +1,1 @@
+TROLL_DUNGEON = "Cinematic fantasy movie shot, dim torchlight. A terrifying troll with green skin holding a rusty bloody axe stands in a small stone dungeon room. Bloodstains on the floor. The troll breathes heavily and blocks the doorway. High definition, 4k, dark atmosphere."
