@@ -13,33 +13,55 @@ active_sessions = {}
 db_manager = GameDBManager()
 director = AutomatedDirector()
 
+GAMES_DIR = "games"
+if not os.path.exists(GAMES_DIR):
+    os.makedirs(GAMES_DIR)
+
+# --- NEW: Endpoint to list available games ---
+@app.route('/games', methods=['GET'])
+def list_games():
+    """Returns a list of all files in the games directory."""
+    try:
+        # List all files in the directory (ignoring subdirectories)
+        available_games = [f for f in os.listdir(GAMES_DIR) if os.path.isfile(os.path.join(GAMES_DIR, f))]
+        return jsonify({"available_games": available_games}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/game/start', methods=['POST'])
+def start_game():
+    data = request.json
+    game_filename = data.get("game_file")
+    
+    if not game_filename:
+         return jsonify({"error": "No game_file provided in request"}), 400
+    
+    # SECURITY: Use os.path.basename to prevent directory traversal attacks (e.g., "../../../etc/passwd")
+    safe_filename = os.path.basename(game_filename)
+    game_path = os.path.join(GAMES_DIR, safe_filename)
+    
+    if not os.path.exists(game_path):
+        return jsonify({"error": f"Game file '{safe_filename}' not found in the '{GAMES_DIR}' directory."}), 404
+
+    session_id = str(uuid.uuid4())
+    db_name = db_manager.get_or_create_db(safe_filename)
+    
+    # Initialize the controller using the full path to the game
+    controller = JerichoController(game_path, db_name)
+    active_sessions[session_id] = controller
+    
+    return jsonify({
+        "message": "Game started", 
+        "session_id": session_id,
+        "db_name": db_name,
+        "game_used": safe_filename
+    })
 
 #Functions
 def generate_game_terms_via_llm(game_name, initial_context):
     # Your LLM call here...
     # Returns: ["alien", "laser", "airlock", "oxygen"]
     pass
-
-@app.route('/game/start', methods=['POST'])
-def start_game():
-    data = request.json
-    game_file = data.get("game_file", "Control4.z8")
-    
-    if not os.path.exists(game_file):
-        return jsonify({"error": "Game file not found"}), 404
-
-    session_id = str(uuid.uuid4())
-    db_name = db_manager.get_or_create_db(game_file)
-    
-    # Initialize the controller and store it in our global sessions
-    controller = JerichoController(game_file, db_name)
-    active_sessions[session_id] = controller
-    
-    return jsonify({
-        "message": "Game started", 
-        "session_id": session_id,
-        "db_name": db_name
-    })
 
 @app.route('/game/<session_id>/step', methods=['POST'])
 def step_game(session_id):
@@ -72,7 +94,7 @@ def generate_video(session_id):
     def run_video_gen():
         video_logger = SQLLogger(db_name)
         videomaker = SceneSelector(db=video_logger, director=director, key_terms=game_terms)
-        game_terms = generate_game_terms_via_llm(game_name, initial_context)
+        game_terms = ["alien", "laser", "airlock", "oxygen"]
         # Note: You'll need to modify 'run_auto' to not ask for input(), but to accept an index automatically
         videomaker.run_auto(start_tick=start_tick, end_tick=end_tick) 
         video_logger.close()
