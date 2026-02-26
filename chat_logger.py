@@ -148,9 +148,15 @@ def produce_video_from_tick(tick, room_name, logger, director):
 
 
 class GameDBManager:
-    REGISTRY_FILE = "game_registry.csv"
+    DB_FOLDER = "GamesDB"
+    # Put the registry file inside the folder too to keep things clean
+    REGISTRY_FILE = os.path.join("GamesDB", "game_registry.csv") 
 
     def __init__(self):
+        # Ensure the folder exists before doing anything
+        if not os.path.exists(self.DB_FOLDER):
+            os.makedirs(self.DB_FOLDER)
+
         if not os.path.exists(self.REGISTRY_FILE):
             with open(self.REGISTRY_FILE, "w", newline="") as f:
                 writer = csv.writer(f)
@@ -166,15 +172,50 @@ class GameDBManager:
                 if row["game_file"] == game_file:
                     return row["db_name"]
 
-        # 2. If not found → create new DB entry
-        db_name = f"db_{os.path.splitext(game_file)[0]}.db"
+        # 2. If not found → create new DB entry prepended with the folder path
+        raw_db_name = f"db_{os.path.splitext(game_file)[0]}.db"
+        db_name = os.path.join(self.DB_FOLDER, raw_db_name)
 
         with open(self.REGISTRY_FILE, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([game_file, db_name])
 
         print(f"🆕 Created new DB mapping: {game_file} → {db_name}")
+        
+        # --- THE FIX: Actually create the physical DB file and base schema ---
+        import sqlite3
+        try:
+            conn = sqlite3.connect(db_name)
+            cursor = conn.cursor()
+            # Initialize the base table so the file is written to disk properly
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS room_desc (
+                room_name TEXT,
+                description TEXT,
+                tick INTEGER,
+                PRIMARY KEY (room_name, tick)
+            );
+            """)
+            conn.commit()
+            conn.close()
+            print(f"🗄️ Initialized physical SQLite database at: {db_name}")
+        except sqlite3.Error as e:
+            print(f"❌ Failed to initialize database file {db_name}: {e}")
+
         return db_name
+    def sync_games_directory(self, games_dir):
+        """Scans the games folder on boot and ensures all games are registered."""
+        print(f"🔄 Syncing registry with {games_dir}...")
+        if not os.path.exists(games_dir):
+            return
+            
+        for filename in os.listdir(games_dir):
+            file_path = os.path.join(games_dir, filename)
+            # Only register actual files (ignoring subdirectories or hidden OS files)
+            if os.path.isfile(file_path) and not filename.startswith('.'):
+                # get_or_create_db already checks if it exists, so this is safe to call
+                self.get_or_create_db(filename)
+        print("✅ Registry sync complete.")
 
 class DramaScorer:
     def __init__(self, key_terms=None):
@@ -676,9 +717,9 @@ def generate_gemini_response(sender, receiver, context, room):
 # --- CONTROLLER ---
 
 class JerichoController:
-    def __init__(self, game_file_path):
+    def __init__(self, game_file_path, db_name="jericho_game.db"):
         self.env = jericho.FrotzEnv(game_file_path)
-        self.logger = SQLLogger("jericho_game.db")
+        self.logger = SQLLogger(db_name)
         self.tick_count = 0
         self.npc_names = ["Bob", "Alice", "Guard"] # Defined for parsing logic
         self.env.reset()
@@ -1044,9 +1085,10 @@ class SceneSelector:
 
         return top_candidates
 
-    def run_auto(self, start_tick, end_tick):
+    def run_auto(self, start_tick, end_tick, selection="all"):
         """
-        Automated workflow: Scan -> Select Best -> Generate
+        Automated workflow updated for server use (no input() prompts).
+        selection can be "all" or an integer index.
         """
         top_scenes = self.scan_and_rank(start_tick, end_tick)
         
@@ -1054,17 +1096,20 @@ class SceneSelector:
             print("No interesting scenes found in this range.")
             return
 
-        selection = input("\nEnter the index number to generate video (or 'all'): ")
-        
-        if selection.lower() == 'all':
+        # Server-safe selection logic
+        if str(selection).lower() == 'all':
             for _, _, _, scene_data in top_scenes:
                 self._generate_video_from_scene(scene_data)
         else:
-            idx = int(selection) - 1
-            if 0 <= idx < len(top_scenes):
-                # We unpack the tuple we stored earlier
-                _, _, _, scene_data = top_scenes[idx]
-                self._generate_video_from_scene(scene_data)
+            try:
+                idx = int(selection) - 1
+                if 0 <= idx < len(top_scenes):
+                    _, _, _, scene_data = top_scenes[idx]
+                    self._generate_video_from_scene(scene_data)
+                else:
+                    print(f"⚠️ Selection {selection} out of range.")
+            except ValueError:
+                print(f"⚠️ Invalid selection parameter: {selection}")
 
     def _detect_emotion_nrc(self,sentence, threshold=0.3):
         emotion = NRCLex(sentence)
@@ -1137,194 +1182,23 @@ class SceneSelector:
             script=script,
             output_filename=f"scene_tick_{scene_data.get('tick', 0)}_{room_name}.mp4"
         )
-# class MovieDirector:
-#     def __init__(self):
-#         self.assets = {}
-#         self.architect = SceneArchitect()
-
-#     def _download_video(self, video_uri, filename):
-#         """
-#         Helper to download the remote video using the API Key.
-#         """
-#         print(f"   ⬇️  Downloading from Cloud...")
-#         # The URI usually looks like: https://generativelanguage.googleapis.com/v1beta/files/...
-#         # We must authorize this download with the API KEY.
-#         headers = {"x-goog-api-key": GEMINI_API_KEY}
-        
-#         response = requests.get(video_uri, headers=headers, stream=True)
-#         if response.status_code == 200:
-#             with open(filename, 'wb') as f:
-#                 for chunk in response.iter_content(chunk_size=8192):
-#                     f.write(chunk)
-#             print(f"✅ Cut! Saved to {filename}")
-#             return filename
-#         else:
-#             print(f"❌ Download failed: {response.status_code} - {response.text}")
-#             return None
-
-#     def generate_master_shot(self, agent_name, agent_desc, room_desc, facing="right"):
-#         if room_desc in self.architect.room_anchors:
-#             visual_anchor = self.architect.room_anchors[room_desc]
-#         else:
-#             visual_anchor = self.architect.design_set(room_desc)
-#         print(f"📸 Casting {agent_name}...")
-#         prompt = f"""
-#         A cinematic mid-shot of {agent_desc}.
-#         The character is facing slightly to the {facing}.
-        
-#         BACKGROUND CONTEXT:
-#         The character is standing in {visual_anchor}.
-        
-#         Apply a consistent color grading. High quality, photorealistic, 8k.
-#         """
-#         try:
-#             response = client.models.generate_images(
-#                 model=IMG_MODEL,
-#                 prompt=prompt,
-#                 config=types.GenerateImagesConfig(
-#                     number_of_images=1, 
-#                     aspect_ratio="16:9"
-#                 )
-#             )
-#             filename = f"master_{agent_name}.png"
-#             response.generated_images[0].image.save(filename)
-#             self.assets[agent_name] = filename
-#             print(f"✅ Saved master shot: {filename}")
-#             return filename
-#         except Exception as e:
-#             print(f"❌ Image Gen Failed for {agent_name}: {e}")
-#             return None
-
-#     def film_scene(self, speaker_name, dialogue_line, emotion="neutral"):
-#         if speaker_name not in self.assets:
-#             print(f"⚠️ Missing master asset for {speaker_name}!")
-#             return None
-
-#         print(f"🎥 Filming {speaker_name}: '{dialogue_line}'...")
-        
-#         file_path = self.assets[speaker_name]
-        
-#         try:
-#             # 1. Read Raw Bytes (Required for Veo in this SDK)
-#             with open(file_path, "rb") as f:
-#                 raw_data = f.read()
-
-#             image_input = types.Image(
-#                 image_bytes=raw_data, 
-#                 mime_type="image/png"
-#             )
-            
-#             text_prompt = f"""
-#             The character looks {emotion}.
-#             The character speaks the following line clearly: "{dialogue_line}"
-#             Cinematic lighting, realistic facial animation.
-#             """
-            
-#             # 2. Start Generation
-#             operation = client.models.generate_videos(
-#                 model=VID_MODEL,
-#                 prompt=text_prompt,
-#                 image=image_input,
-#                 config=types.GenerateVideosConfig(
-#                     number_of_videos=1,
-#                     aspect_ratio="16:9"
-#                 )
-#             )
-
-#             print(f"   Action! (Processing...)")
-            
-#             # 3. Polling Loop
-#             while not operation.done:
-#                 time.sleep(5)
-#                 # Pass the OPERATION OBJECT, not the string name
-#                 operation = client.operations.get(operation)
-
-#             if operation.result:
-#                 generated_video = operation.result.generated_videos[0]
-                
-#                 # 4. MANUAL DOWNLOAD FIX
-#                 # We access the .uri property and download it ourselves
-#                 filename = f"clip_{int(time.time())}_{speaker_name}.mp4"
-#                 return self._download_video(generated_video.video.uri, filename)
-#             else:
-#                 print("❌ Action failed (No result).")
-#                 return None
-                
-#         except Exception as e:
-#             print(f"❌ Video Gen Failed: {e}")
-#             return None
-
-#     def stitch_movie(self, clip_files, output_name="final_scene.mp4"):
-#         # Filter out Nones
-#         valid_clips = [c for c in clip_files if c is not None]
-        
-#         if not valid_clips:
-#             print("No clips to stitch!")
-#             return
-
-#         print(f"🎞️ Stitching {len(valid_clips)} clips...")
-#         list_file = "ffmpeg_list.txt"
-        
-#         with open(list_file, "w") as f:
-#             for vid in valid_clips:
-#                 if os.path.exists(vid):
-#                     f.write(f"file '{vid}'\n")
-        
-#         cmd = [
-#             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-#             "-i", list_file, 
-#             "-c", "copy", 
-#             output_name
-#         ]
-#         subprocess.run(cmd, check=True)
-#         print(f"🍿 Movie Premiere: {output_name}")
-#         os.remove(list_file)
 
 if __name__ == "__main__":
     try:
         director = AutomatedDirector()
         GAME_FILE = "Control4.z8"  
-        controller = JerichoController(GAME_FILE)
         db_manager = GameDBManager()
         db_name = db_manager.get_or_create_db(GAME_FILE)
-        logger = SQLLogger(db_name)
+        controller = JerichoController(game_file_path=GAME_FILE,db_name=db_name)
+        video_logger = SQLLogger(db_name)
         controller.run()
-        print(logger.get_rooms_for_tick(1))
+        print(video_logger.get_rooms_for_tick(1))
         game_terms = ["darkness", "grue", "lamp", "spell"]
-        videomaker = SceneSelector(db=logger,director=director,key_terms=game_terms)
+        videomaker = SceneSelector(db=video_logger,director=director,key_terms=game_terms)
         videomaker.run_auto(start_tick=0, end_tick=500)
         
     except FileNotFoundError:
         print(f"Error: Could not find game file '{GAME_FILE}'")
 
-# # 2. Your Game Data (Raw from Jericho)
-#         jericho_room = "A dimly lit Victorian study with a large mahogany desk and rain hitting the window."
-
-#         jericho_agents = [
-#             {
-#                 "name": "Detective",
-#                 "desc": "a weary detective in a rumpled suit smoking a pipe",
-#                 "facing": "north" 
-#             },
-#             {
-#                 "name": "FemmeFatale", 
-#                 "desc": "a mysterious woman in a red silk dress holding a glass of wine",
-#                 "facing": "south" 
-#             }
-#         ]
-
-#         jericho_script = [
-#             ("Detective", "I knew you'd come back.", "calm"),
-#             ("FemmeFatale", "I didn't have a choice, did I?", "sad"),
-#             ("Detective", "We always have a choice.", "stern")
-#         ]
-
-        # # 3. ACTION!
-        # director.produce_scene(
-        #     room_description=jericho_room,
-        #     agents=jericho_agents,
-        #     script=jericho_script,
-        #     output_filename="jericho_detective_scene.mp4"
-        # )
     except FileNotFoundError:
         print("Game file not found.")
