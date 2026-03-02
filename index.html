@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Jericho Studio Dashboard</title>
+    <style>
+        body { font-family: system-ui; background: #121212; color: #fff; padding: 20px; max-width: 1000px; margin: 0 auto; }
+        .panel { background: #1e1e1e; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #333; }
+        .flex { display: flex; gap: 10px; flex-wrap: wrap; }
+        button { background: #007bff; color: white; border: none; padding: 10px 15px; cursor: pointer; border-radius: 4px; font-weight: bold; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        .image-gallery img { height: 180px; border-radius: 4px; border: 2px solid #555; margin-right: 10px; }
+        .script-box { background: #000; padding: 10px; font-family: monospace; border-left: 3px solid #007bff; margin: 10px 0; }
+        #log { color: #aaa; font-size: 0.9em; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <h1>🎬 Jericho Studio Director's Dashboard</h1>
+    
+    <div class="panel">
+        <h2>1. Simulation Engine</h2>
+        <div class="flex">
+            <select id="gameSelect" style="padding: 10px; border-radius: 4px; background: #333; color: white; border: 1px solid #555;">
+                <option value="">Loading games...</option>
+            </select>
+
+            <button id="btnStart" onclick="startGame()">Start Game</button>
+            <button id="btnStep" onclick="stepGame(1)" disabled>Simulate 1 Turn</button>
+            <button id="btnStep5" onclick="stepGame(5)" disabled>Simulate 5 Turns</button>
+        </div>
+        <p id="simStatus">Status: Awaiting game start...</p>
+    </div>
+        <p id="simStatus">Status: Awaiting game start...</p>
+    </div>
+
+    <div class="panel">
+        <h2>2. Pre-Production (MediaPipe Engine)</h2>
+        <button id="btnCandidates" onclick="loadCandidates()" disabled>Generate Pre-Viz Candidates</button>
+        <p id="log"></p>
+        <div id="candidatesContainer"></div>
+    </div>
+
+    <script>
+        const API_BASE = "http://localhost:5000";
+        let sessionId = "";
+        let currentTick = 0;
+
+        // NEW: Fetch games the moment the page opens
+        window.onload = async function() {
+            try {
+                const res = await fetch(`${API_BASE}/games`);
+                const data = await res.json();
+                
+                const select = document.getElementById("gameSelect");
+                select.innerHTML = ""; // Clear the 'Loading...' text
+                
+                if (data.available_games.length === 0) {
+                    select.innerHTML = `<option value="">No .z8 games found!</option>`;
+                    document.getElementById("btnStart").disabled = true;
+                    return;
+                }
+
+                data.available_games.forEach(game => {
+                    select.innerHTML += `<option value="${game}">${game}</option>`;
+                });
+            } catch (e) { 
+                document.getElementById("gameSelect").innerHTML = `<option value="">Error connecting to API</option>`;
+            }
+        };
+
+        async function startGame() {
+            // NEW: Read from the dropdown instead of hardcoding [0]
+            const gameFile = document.getElementById("gameSelect").value;
+            if (!gameFile) return;
+
+            document.getElementById("simStatus").innerText = "Status: Starting...";
+            document.getElementById("btnStart").disabled = true; 
+
+            try {
+                const res = await fetch(`${API_BASE}/game/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ game_file: gameFile })
+                });
+                
+                if (!res.ok) throw new Error("Failed to start");
+                
+                const data = await res.json();
+                sessionId = data.session_id;
+                
+                document.getElementById("simStatus").innerText = `Status: Active (${gameFile}) | Session: ${sessionId.substring(0,8)}... | Tick: ${currentTick}`;
+                document.getElementById("btnStep").disabled = false;
+                document.getElementById("btnStep5").disabled = false;
+                document.getElementById("btnCandidates").disabled = false;
+            } catch (e) { 
+                alert("Failed to connect to server."); 
+                document.getElementById("btnStart").disabled = false;
+            }
+        }
+
+        async function stepGame(turns=1) {
+            document.getElementById("simStatus").innerText = `Status: Simulating...`;
+            for(let i=0; i<turns; i++) {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/step`, { method: 'POST' });
+                const data = await res.json();
+                currentTick = data.tick;
+            }
+            document.getElementById("simStatus").innerText = `Status: Active | Tick: ${currentTick}`;
+        }
+
+        async function loadCandidates() {
+            const container = document.getElementById("candidatesContainer");
+            const log = document.getElementById("log");
+            
+            document.getElementById("btnCandidates").disabled = true;
+            log.innerText = "Generating backgrounds, agents, and running MediaPipe compositing... (Check terminal)";
+            container.innerHTML = "";
+            
+            const res = await fetch(`${API_BASE}/game/${sessionId}/candidates`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}) 
+            });
+            const data = await res.json();
+            
+            log.innerText = "Pre-Viz complete!";
+            document.getElementById("btnCandidates").disabled = false;
+            
+            data.candidates.forEach(scene => {
+                let imgTags = Object.values(scene.images).map(path => 
+                    `<img src="${API_BASE}/${path.replace(/\\/g, '/')}" alt="Master Shot">`
+                ).join("");
+
+                let scriptTags = scene.script.map(line => 
+                    `<div><b>${line.speaker}:</b> ${line.line}</div>`
+                ).join("");
+
+                container.innerHTML += `
+                <div class="panel" style="background:#222">
+                    <h3>Room: ${scene.room} (Tick ${scene.tick}) | Drama Score: ${scene.score.toFixed(1)}</h3>
+                    <div class="image-gallery">${imgTags}</div>
+                    <div class="script-box">${scriptTags}</div>
+                    <button onclick="renderVideo(${scene.tick}, '${scene.room}')">🎬 Render Final Video</button>
+                </div>`;
+            });
+        }
+
+        async function renderVideo(tick, room) {
+            alert(`Render started for Tick ${tick}! Veo is generating clips in the background. Check your terminal for the ffmpeg completion.`);
+            await fetch(`${API_BASE}/game/${sessionId}/render`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tick: tick, room: room })
+            });
+        }
+    </script>
+</body>
+</html>

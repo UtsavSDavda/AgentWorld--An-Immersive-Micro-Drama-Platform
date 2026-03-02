@@ -13,11 +13,20 @@ import requests
 import subprocess
 import heapq
 import statistics
-import re
 from textblob import TextBlob
 import json
 from nrclex import NRCLex
 import csv 
+from PIL import Image
+import io
+
+# --- NEW IMPORTS FOR MEDIAPIPE ---
+import cv2
+import numpy as np
+import urllib.request
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
 load_dotenv()
 
@@ -169,6 +178,8 @@ class GameDBManager:
         with open(self.REGISTRY_FILE, "r") as f:
             reader = csv.DictReader(f)
             for row in reader:
+                if not row:
+                    continue
                 if row["game_file"] == game_file:
                     return row["db_name"]
 
@@ -847,11 +858,30 @@ class AutomatedDirector:
         else:
             print("⚠️ No JSON object found in response.")
             return None
+    def get_room_cache_dir(self, game_name, room_name):
+        """Creates and returns a safe directory path for caching room assets."""
+        safe_game = os.path.splitext(game_name)[0] # e.g., 'Control4.z8' -> 'Control4'
+        safe_game = re.sub(r'\W+', '_', safe_game)
+        safe_room = re.sub(r'\W+', '_', room_name)
+        
+        dir_path = os.path.join("Assets", safe_game, safe_room)
+        os.makedirs(dir_path, exist_ok=True)
+        return dir_path
 
-    def _design_set_automatically(self, raw_room_desc):
-        """
-        Uses LLM to expand a single game description into a full 3D room layout.
-        """
+    def _design_set_automatically(self, raw_room_desc, game_name, room_name):
+        """Checks cache for existing set design JSON before generating."""
+        cache_dir = self.get_room_cache_dir(game_name, room_name)
+        json_path = os.path.join(cache_dir, "set_design.json")
+        
+        # 1. Check File System Cache
+        if os.path.exists(json_path):
+            print(f"♻️ Loading cached set design for {room_name}...")
+            try:
+                with open(json_path, 'r') as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                print("⚠️ Cache corrupted. Regenerating set design...")
+
         print(f"🏗️  AI Set Designer analyzing: '{raw_room_desc}'...")
         
         prompt = f"""
@@ -861,7 +891,7 @@ class AutomatedDirector:
         Your job is to "flesh out" this room into a strict layout.
         1. Extract the main material (walls/floor).
         2. Assign features to the North, South, East, and West walls. 
-           (If the description doesn't say what's on the North wall, INVENT something that fits the theme).
+        (If the description doesn't say what's on the North wall, INVENT something that fits the theme).
         3. Determine if it is indoors or outdoors.
 
         Output ONLY valid JSON in this format:
@@ -880,104 +910,208 @@ class AutomatedDirector:
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        raw_text = response.text
-        print(f"DEBUG: Raw LLM Output:\n{raw_text}") 
-        data = self._clean_and_parse_json(raw_text)
-        if not data:
-            # Fallback default if parsing fails completely
-            print("❌ Parsing failed. Using default empty room.")
-            return {
+        
+        data = self._clean_and_parse_json(response.text)
+        if not data or (isinstance(data, list) and len(data) == 0):
+            data = {
                 "materials": "Generic walls",
-                "north": "Empty", "south": "Empty", "east": "Empty", "west": "Empty",
+                "north": "Empty", "south": "Empty",
+                "east": "Empty", "west": "Empty",
                 "is_indoors": True
             }
-        if isinstance(data, list):
-            if len(data) > 0:
-                data = data[0]
-            else:
-                print("❌ Empty list returned. Using fallback.")
-                return {
-                    "materials": "Generic walls",
-                    "north": "Empty", "south": "Empty",
-                    "east": "Empty", "west": "Empty",
-                    "is_indoors": True
-                }
+        elif isinstance(data, list):
+            data = data[0]
 
+        # 2. Save to Cache
+        with open(json_path, 'w') as f:
+            json.dump(data, f, indent=4)
+            
         return data
 
-    def _download_video(self, video_uri, filename):
-        # Helper to download video from URI
-        headers = {"x-goog-api-key": GEMINI_API_KEY}
-        response = requests.get(video_uri, headers=headers, stream=True)
-        if response.status_code == 200:
-            with open(filename, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            print(f"✅ Cut! Saved to {filename}")
-            return filename
-        return None
+    def create_agent_plate(self, agent_name, agent_desc):
+        """Generates a reusable character cutout on a plain background."""
+        # We store agents globally, not tied to a specific game, so they persist everywhere
+        agent_dir = os.path.join("Assets", "Global_Agents")
+        os.makedirs(agent_dir, exist_ok=True)
+        filepath = os.path.join(agent_dir, f"{agent_name}.png")
 
-    def create_master_assets(self, agents, room_data):
+        if os.path.exists(filepath):
+            print(f"♻️ Loading existing agent plate for {agent_name}...")
+            return filepath
+
+        # Prompt explicitly requests a neutral background for easy removal
+        prompt = f"""
+        Cinematic mid-shot of {agent_desc}.
+        The character is facing the camera.
+        Shot in a brightly lit studio with a solid, flat grey background.
         """
-        Generates consistent images for all agents based on the Room Geometry.
-        agents = [{'name': 'Guard', 'desc': '...', 'facing': 'north'}]
+        
+        print(f"📸 Photographing Agent: {agent_name}...")
+        try:
+            response = client.models.generate_images(
+                model=IMG_MODEL,
+                prompt=prompt,
+                config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio="1:1") # Square is usually better for character isolation
+            )
+            response.generated_images[0].image.save(filepath)
+            return filepath
+        except Exception as e:
+            print(f"❌ Failed to photograph {agent_name}: {e}")
+            return None
+
+    def create_background_plate(self, room_data, game_name, room_name, facing_direction):
+        """Generates the empty background wall."""
+        cache_dir = self.get_room_cache_dir(game_name, room_name)
+        filepath = os.path.join(cache_dir, f"wall_{facing_direction}.png")
+
+        if os.path.exists(filepath):
+            return filepath
+
+        bg_feature = room_data.get(facing_direction, room_data.get('north', 'Empty'))
+        
+        # Prompt explicitly requests NO people
+        prompt = f"""
+        Empty background plate, no people, no characters.
+        Location style: {room_data['materials']}.
+        Visible background: {bg_feature}.
         """
+        if room_data.get('is_indoors', True):
+            prompt += " Environment: INTERIOR. Enclosed space. Ceiling visible. No sky."
+
+        print(f"🖼️ Painting Background: {room_name} ({facing_direction} wall)...")
+        try:
+            response = client.models.generate_images(
+                model=IMG_MODEL,
+                prompt=prompt,
+                config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio="16:9")
+            )
+            response.generated_images[0].image.save(filepath)
+            return filepath
+        except Exception as e:
+            print(f"❌ Failed to paint background: {e}")
+            return None
+
+    # --- UPDATED MEDIAPIPE COMPOSITING METHOD ---
+    def composite_scene_master(self, agent_path, bg_path, game_name, room_name, agent_name, facing):
+        """Cuts the agent out and pastes them onto the background plate using MediaPipe segmentation."""
+        cache_dir = self.get_room_cache_dir(game_name, room_name)
+        output_path = os.path.join(cache_dir, f"scene_master_{agent_name}_facing_{facing}.png")
+
+        if os.path.exists(output_path):
+            return output_path
+
+        print(f"✂️ Compositing {agent_name} into {room_name} via MediaPipe...")
+        try:
+            # 1. Download the Selfie Segmentation model if you don't have it yet
+            model_path = 'selfie_segmenter.tflite'
+            if not os.path.exists(model_path):
+                print("Downloading MediaPipe model...")
+                url = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite'
+                urllib.request.urlretrieve(url, model_path)
+                print("Download complete.")
+
+            # 2. Load the images
+            person_img = cv2.imread(agent_path)
+            bg_img = cv2.imread(bg_path)
+
+            if person_img is None or bg_img is None:
+                print("Error: Could not read images. Check your file paths.")
+                return None
+
+            # 3. Setup the MediaPipe Tasks options
+            base_options = python.BaseOptions(model_asset_path=model_path)
+            options = vision.ImageSegmenterOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE,
+                output_category_mask=False,
+                output_confidence_masks=True 
+            )
+
+            # 4. Initialize the Segmenter and process the image
+            with vision.ImageSegmenter.create_from_options(options) as segmenter:
+                # Resize person to maintain the 85% cinematic height ratio from your original logic
+                bh, bw, _ = bg_img.shape
+                ph, pw, _ = person_img.shape
+                
+                target_height = int(bh * 0.85) 
+                aspect_ratio = pw / ph
+                target_width = int(target_height * aspect_ratio)
+                
+                # Resize person FIRST so the mask matches exactly what we will blend
+                person_resized = cv2.resize(person_img, (target_width, target_height), interpolation=cv2.INTER_LANCZOS4)
+
+                # Convert BGR (OpenCV) to RGB for MediaPipe
+                rgb_person_img = cv2.cvtColor(person_resized, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_person_img)
+
+                # Retrieve the segmentation mask
+                segmentation_result = segmenter.segment(mp_image)
+                
+                # Retrieve confidence mask 
+                person_mask = segmentation_result.confidence_masks[0].numpy_view()
+
+                # 5. Smooth the mask for a natural look
+                person_mask_blurred = cv2.GaussianBlur(person_mask, (7, 7), 0)
+                mask_3d = np.stack((person_mask_blurred,) * 3, axis=-1)
+
+                # 6. Composite the images using Alpha Blending (calculating Region of Interest)
+                # Calculate center-bottom position on the background
+                x_offset = (bw - target_width) // 2
+                y_offset = bh - target_height
+
+                # Extract exactly where the person will go on the background
+                roi = bg_img[y_offset:y_offset+target_height, x_offset:x_offset+target_width]
+
+                # Blend only that exact area
+                foreground = (person_resized * mask_3d).astype(np.uint8)
+                background = (roi * (1 - mask_3d)).astype(np.uint8)
+                blended = cv2.add(foreground, background)
+
+                # Push blended area back into full background
+                bg_img[y_offset:y_offset+target_height, x_offset:x_offset+target_width] = blended
+
+                # 7. Save the final result
+                cv2.imwrite(output_path, bg_img)
+                print(f"✅ Success! Saved to {output_path}")
+                return output_path
+                
+        except Exception as e:
+            print(f"❌ Compositing failed: {e}")
+            
+        return None
+    def prepare_scene_assets(self, room_description, agents, game_name, room_name):
+        """Phase 1: Generates the master composited images using your MediaPipe pipeline."""
+        room_data = self._design_set_automatically(room_description, game_name, room_name)
+        
+        scene_assets = {}
         for agent in agents:
             name = agent['name']
             desc = agent['desc']
             facing = agent.get('facing', 'north').lower()
             
-            # 1. Determine Background based on facing direction
-            # If I look North, I see the North wall.
-            bg_feature = room_data.get(facing, room_data['north'])
+            # Generate the individual plates
+            agent_path = self.create_agent_plate(name, desc)
+            bg_path = self.create_background_plate(room_data, game_name, room_name, facing)
             
-            prompt = f"""
-            Cinematic mid-shot of {desc}.
-            The character is facing the camera (body oriented {facing}).
-            
-            BACKGROUND:
-            Location style: {room_data['materials']}.
-            Visible background: {bg_feature}.
-            """
-            
-            if room_data['is_indoors']:
-                prompt += " Environment: INTERIOR. Enclosed space. Ceiling visible. No sky."
+            # Composite them using your MediaPipe Segmenter!
+            if agent_path and bg_path:
+                comp_path = self.composite_scene_master(agent_path, bg_path, game_name, room_name, name, facing)
+                if comp_path:
+                    scene_assets[name] = comp_path
+                
+        return scene_assets
 
-            print(f"📸 Casting {name} (Facing {facing})...")
-            
-            try:
-                response = client.models.generate_images(
-                    model=IMG_MODEL,
-                    prompt=prompt,
-                    config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio="16:9")
-                )
-                filename = f"master_{name}.png"
-                response.generated_images[0].image.save(filename)
-                self.assets[name] = filename
-            except Exception as e:
-                print(f"❌ Failed to cast {name}: {e}")
-
-    def produce_scene(self, room_description, agents, script, output_filename="jericho_scene.mp4"):
-        """
-        The Main Function: Takes raw game data -> Final MP4
-        """
-        # Step 1: Design the Set (Auto-Hallucinate 4 walls)
-        room_data = self._design_set_automatically(room_description)
-        
-        # Step 2: Generate Master Assets
-        self.create_master_assets(agents, room_data)
-        
-        # Step 3: Film the Script
+    def film_scene(self, script, scene_assets, game_name, room_name, output_filename):
+        """Phase 2: Sends the cached MediaPipe composites to Veo."""
         clips = []
         for i, (speaker, line, emotion) in enumerate(script):
-            if speaker not in self.assets:
-                print(f"⚠️ Skipping line for unknown speaker: {speaker}")
+            if speaker not in scene_assets:
+                print(f"⚠️ Skipping line for {speaker}: No master asset found.")
                 continue
                 
             print(f"🎥 Filming Line {i+1}/{len(script)}: {speaker}")
             
-            # Load Asset
-            with open(self.assets[speaker], "rb") as f:
+            with open(scene_assets[speaker], "rb") as f:
                 raw_data = f.read()
             
             image_input = types.Image(image_bytes=raw_data, mime_type="image/png")
@@ -995,39 +1129,56 @@ class AutomatedDirector:
                     config=types.GenerateVideosConfig(number_of_videos=1, aspect_ratio="16:9")
                 )
                 
-                while not operation.done:
-                    time.sleep(3)
-                    operation = client.operations.get(operation) # Fixed polling
+                attempts = 0
+                while not operation.done and attempts < 60:
+                    time.sleep(5)
+                    operation = client.operations.get(operation)
+                    attempts += 1
 
-                if operation.result:
+                if operation.result and operation.result.generated_videos:
                     fname = f"clip_{i:03d}_{speaker}.mp4"
-                    # Fixed Download Logic
                     downloaded = self._download_video(operation.result.generated_videos[0].video.uri, fname)
                     if downloaded:
                         clips.append(downloaded)
             except Exception as e:
                 print(f"❌ Clip failed: {e}")
 
-        # Step 4: Stitch
+        # Stitch
         if clips:
             print(f"🎞️ Stitching {len(clips)} clips...")
-            with open("ffmpeg_list.txt", "w") as f:
+            with open(f"ffmpeg_list_{room_name}.txt", "w") as f:
                 for vid in clips:
                     f.write(f"file '{vid}'\n")
             
-            subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "ffmpeg_list.txt", "-c", "copy", output_filename], check=True)
-            os.remove("ffmpeg_list.txt")
+            subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", f"ffmpeg_list_{room_name}.txt", "-c", "copy", output_filename], check=True)
+            os.remove(f"ffmpeg_list_{room_name}.txt")
+            
+            for vid in clips:
+                if os.path.exists(vid): os.remove(vid)
+                    
             print(f"🍿 Scene Complete: {output_filename}")
-        else:
-            print("⚠️ No clips generated.")
+            return output_filename
+        return None
+    def _download_video(self, video_uri, filename):
+        # Helper to download video from URI
+        headers = {"x-goog-api-key": GEMINI_API_KEY}
+        response = requests.get(video_uri, headers=headers, stream=True)
+        if response.status_code == 200:
+            with open(filename, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"✅ Cut! Saved to {filename}")
+            return filename
+        return None
 
 class SceneSelector:
 
-    def __init__(self, db, director, key_terms=None):
+    def __init__(self, db, director, key_terms=None,game_name="UnknownGame"):
         self.db = db
         self.director = director
         self.room_asset_cache = {}
-        
+        self.game_name = game_name 
+    
         # INTEGRATION: Initialize the Drama Engine
         # We pass your specific game terms here
         self.scorer = DramaScorer(key_terms=key_terms) 
@@ -1136,7 +1287,6 @@ class SceneSelector:
         
         return label
     def _generate_video_from_scene(self, scene_data):
-        # (This remains largely the same, but now we can inject the score if we want)
         room_name = scene_data["room"]
         room_visual = scene_data["visual"]
         script_data = scene_data["script"]
@@ -1152,10 +1302,7 @@ class SceneSelector:
             speaker = line["speaker"]
             text = line["line"]
             
-            # IMPROVEMENT: Use TextBlob again here for line-by-line emotion?
-            # For now, we keep it neutral or let the Director handle it.
             emotion = self._detect_emotion_nrc(text)
-            print(emotion)
             script.append((speaker, text, emotion))
             
             if speaker not in speakers:
@@ -1166,21 +1313,18 @@ class SceneSelector:
                 })
                 speakers.add(speaker)
 
-        if room_name not in self.room_asset_cache:
-            print(f"🆕 Designing new master assets for room: {room_name}")
-            # Assuming your director has this method
-            room_data = self.director._design_set_automatically(room_visual)
-            self.director.create_master_assets(agents, room_data)
-            self.room_asset_cache[room_name] = True
-        else:
-            print(f"♻️ Reusing master assets for room: {room_name}")
-
-        print(f"🎥 Rendering Tick {scene_data.get('tick')}...")
+        print(f"🎥 Rendering Tick {scene_data.get('tick')} for {self.game_name}...")
+        
+        # ⚠️ We completely removed the old `if room_name not in self.room_asset_cache:` block!
+        # The director handles all the set design and asset caching internally now.
+        
         self.director.produce_scene(
             room_description=room_visual,
             agents=agents,
             script=script,
-            output_filename=f"scene_tick_{scene_data.get('tick', 0)}_{room_name}.mp4"
+            game_name=self.game_name,
+            room_name=room_name,
+            output_filename=f"scene_{self.game_name}_tick_{scene_data.get('tick', 0)}_{room_name}.mp4"
         )
 
 if __name__ == "__main__":
