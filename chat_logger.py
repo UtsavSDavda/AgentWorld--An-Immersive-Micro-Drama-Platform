@@ -48,6 +48,13 @@ NPC_PERSONAS = {
 }
 
 # --- DATABASE LOGGER ---
+def split_into_sentences(text):
+    """Splits a paragraph into a list of individual sentences."""
+    if not text:
+        return []
+    # Splits by ., !, or ? followed by a space and a capital letter, or end of string.
+    sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])|(?<=[.!?])$', text.strip())
+    return [s.strip() for s in sentences if s.strip()]
 
 def create_video(tick,context,prompt):
     print("Generating video...")
@@ -447,6 +454,14 @@ class SQLLogger:
         );
         """
         self.cursor.execute(sql)
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS official_timeline (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tick INTEGER,
+            room_name TEXT,
+            UNIQUE(tick, room_name)
+        );
+        """)
         self.conn.commit()
 
     def update_room_desc(self, room_name, description, tick):
@@ -691,7 +706,60 @@ class SQLLogger:
         except sqlite3.Error as e:
             print(f"❌ Database Error while deleting table: {e}")
             return False
+    def log_official_render(self, tick, room_name):
+        """Saves a scene to the 'Director's Cut' timeline."""
+        self.cursor.execute(
+            "INSERT INTO official_timeline (tick, room_name) VALUES (?, ?)", 
+            (tick, room_name)
+        )
+        self.conn.commit()
+        
+    def get_official_timeline(self, past_n_ticks):
+        """Fetches the actual scripts from the scenes you rendered."""
+        self.cursor.execute(
+            "SELECT tick, room_name FROM official_timeline ORDER BY tick DESC LIMIT ?", 
+            (past_n_ticks,)
+        )
+        rendered_scenes = self.cursor.fetchall()
+        
+        # Reverse to chronological order
+        rendered_scenes.reverse() 
+        
+        full_history = []
+        for tick, room in rendered_scenes:
+            data = self.get_structured_scene_data(tick, room)
+            full_history.append(data)
+            
+        return full_history
+    
+    def add_to_timeline(self, tick, room_name):
+        """Allows the user to explicitly lock a scene into the canon timeline."""
+        try:
+            self.cursor.execute(
+                "INSERT INTO official_timeline (tick, room_name) VALUES (?, ?)", 
+                (tick, room_name)
+            )
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            print(f"⚠️ Scene {room_name} (Tick {tick}) is already in the timeline.")
+            return False
 
+    def get_timeline_history(self, past_n=3):
+        """Fetches the last N events added to the timeline in chronological order."""
+        self.cursor.execute(
+            "SELECT tick, room_name FROM official_timeline ORDER BY id DESC LIMIT ?", 
+            (past_n,)
+        )
+        rows = self.cursor.fetchall()
+        rows.reverse() # Flip so the oldest of the 'past N' is first
+        
+        history_data = []
+        for tick, room in rows:
+            scene_data = self.get_structured_scene_data(tick, room)
+            history_data.append(scene_data)
+        return history_data
+        
     def close(self):
         self.conn.close()
 
@@ -831,6 +899,20 @@ class JerichoController:
 class AutomatedDirector:
     def __init__(self):
         self.assets = {} 
+        self.model_path = 'selfie_segmenter.tflite'
+        self._ensure_mediapipe_model()
+
+    def _ensure_mediapipe_model(self):
+        """Downloads the MediaPipe model safely during server boot."""
+        if not os.path.exists(self.model_path):
+            print("⬇️ Downloading MediaPipe Selfie Segmenter model (Server Boot)...")
+            url = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite'
+            import urllib.request
+            urllib.request.urlretrieve(url, self.model_path)
+            print("✅ MediaPipe model download complete.")
+        else:
+            print("✅ MediaPipe model found locally. Ready for compositing.")
+
     def _clean_and_parse_json(self, raw_text):
         """
         Robustly extracts JSON from an LLM response, handling 
@@ -858,6 +940,7 @@ class AutomatedDirector:
         else:
             print("⚠️ No JSON object found in response.")
             return None
+
     def get_room_cache_dir(self, game_name, room_name):
         """Creates and returns a safe directory path for caching room assets."""
         safe_game = os.path.splitext(game_name)[0] # e.g., 'Control4.z8' -> 'Control4'
@@ -1002,15 +1085,7 @@ class AutomatedDirector:
 
         print(f"✂️ Compositing {agent_name} into {room_name} via MediaPipe...")
         try:
-            # 1. Download the Selfie Segmentation model if you don't have it yet
-            model_path = 'selfie_segmenter.tflite'
-            if not os.path.exists(model_path):
-                print("Downloading MediaPipe model...")
-                url = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite'
-                urllib.request.urlretrieve(url, model_path)
-                print("Download complete.")
-
-            # 2. Load the images
+            # 1. Load the images
             person_img = cv2.imread(agent_path)
             bg_img = cv2.imread(bg_path)
 
@@ -1018,8 +1093,8 @@ class AutomatedDirector:
                 print("Error: Could not read images. Check your file paths.")
                 return None
 
-            # 3. Setup the MediaPipe Tasks options
-            base_options = python.BaseOptions(model_asset_path=model_path)
+            # 2. Setup the MediaPipe Tasks options using the pre-loaded model path
+            base_options = python.BaseOptions(model_asset_path=self.model_path)
             options = vision.ImageSegmenterOptions(
                 base_options=base_options,
                 running_mode=vision.RunningMode.IMAGE,
@@ -1027,9 +1102,9 @@ class AutomatedDirector:
                 output_confidence_masks=True 
             )
 
-            # 4. Initialize the Segmenter and process the image
+            # 3. Initialize the Segmenter and process the image
             with vision.ImageSegmenter.create_from_options(options) as segmenter:
-                # Resize person to maintain the 85% cinematic height ratio from your original logic
+                # Resize person to maintain the 85% cinematic height ratio
                 bh, bw, _ = bg_img.shape
                 ph, pw, _ = person_img.shape
                 
@@ -1046,31 +1121,25 @@ class AutomatedDirector:
 
                 # Retrieve the segmentation mask
                 segmentation_result = segmenter.segment(mp_image)
-                
-                # Retrieve confidence mask 
                 person_mask = segmentation_result.confidence_masks[0].numpy_view()
 
-                # 5. Smooth the mask for a natural look
+                # 4. Smooth the mask for a natural look
                 person_mask_blurred = cv2.GaussianBlur(person_mask, (7, 7), 0)
                 mask_3d = np.stack((person_mask_blurred,) * 3, axis=-1)
 
-                # 6. Composite the images using Alpha Blending (calculating Region of Interest)
-                # Calculate center-bottom position on the background
+                # 5. Composite the images using Alpha Blending (calculating Region of Interest)
                 x_offset = (bw - target_width) // 2
                 y_offset = bh - target_height
 
-                # Extract exactly where the person will go on the background
                 roi = bg_img[y_offset:y_offset+target_height, x_offset:x_offset+target_width]
 
-                # Blend only that exact area
                 foreground = (person_resized * mask_3d).astype(np.uint8)
                 background = (roi * (1 - mask_3d)).astype(np.uint8)
                 blended = cv2.add(foreground, background)
 
-                # Push blended area back into full background
                 bg_img[y_offset:y_offset+target_height, x_offset:x_offset+target_width] = blended
 
-                # 7. Save the final result
+                # 6. Save the final result
                 cv2.imwrite(output_path, bg_img)
                 print(f"✅ Success! Saved to {output_path}")
                 return output_path
@@ -1110,12 +1179,13 @@ class AutomatedDirector:
                 continue
                 
             print(f"🎥 Filming Line {i+1}/{len(script)}: {speaker}")
-            
+            camera_angle = "Cinematic mid-shot" if i % 2 == 0 else "Cinematic extreme close-up on face"
             with open(scene_assets[speaker], "rb") as f:
                 raw_data = f.read()
             
             image_input = types.Image(image_bytes=raw_data, mime_type="image/png")
             text_prompt = f"""
+            {camera_angle}.
             The character looks {emotion}.
             The character speaks the following line clearly: "{line}"
             Cinematic lighting, realistic facial animation.
@@ -1170,6 +1240,123 @@ class AutomatedDirector:
             print(f"✅ Cut! Saved to {filename}")
             return filename
         return None
+
+    def generate_recap_script(self, timeline_data):
+        """Converts raw scene data into a dramatic Narrator script."""
+        
+        # 1. Format the history for the LLM
+        raw_log = ""
+        for scene in timeline_data:
+            raw_log += f"--- Room: {scene['room']} (Tick {scene['tick']}) ---\n"
+            for line in scene['script']:
+                raw_log += f"{line['speaker']}: {line['line']}\n"
+
+        if not raw_log:
+            return [("Narrator", "The story has just begun...", "neutral")]
+
+        # 2. Ask Gemini to write a recap
+        prompt = f"""
+        You are the dramatic narrator of a cinematic web series.
+        Read the following transcript of the previous scenes:
+        
+        {raw_log}
+        
+        Write a short, engaging "Previously on..." recap monologue.
+        Keep it under 3 sentences. Focus on the core conflict or mystery.
+        Do not add sound effects or stage directions. Output ONLY the spoken text.
+        """
+        
+        print("✍️ Writing the recap script...")
+        response = client.models.generate_content(
+            model=TEXT_MODEL,
+            contents=prompt
+        )
+        
+        recap_text = response.text.strip()
+        
+        # Return it in the exact format your film_scene method expects
+        return [("Narrator", f"Previously on Jericho... {recap_text}", "serious")]
+
+    def get_fixed_narrator_composite(self):
+        """Creates or loads the permanent Narrator asset."""
+        # Use your existing directory generator so the paths match perfectly
+        studio_dir = self.get_room_cache_dir("Global_Agents", "Narrator_Studio")
+        
+        # This is the EXACT filename composite_scene_master will generate
+        expected_output_name = "scene_master_Narrator_facing_north.png"
+        comp_path = os.path.join(studio_dir, expected_output_name)
+        
+        # If it's already generated, skip everything
+        if os.path.exists(comp_path):
+            print("♻️ Loading existing Narrator studio...")
+            return comp_path
+            
+        print("🎙️ Building the permanent Narrator studio...")
+        
+        # 1. Generate the Agent
+        agent_path = os.path.join(studio_dir, "Narrator_Raw.png")
+        if not os.path.exists(agent_path):
+            prompt = "Cinematic mid-shot of a mysterious, sharply dressed narrator standing confidently. Solid grey background."
+            res = client.models.generate_images(model=IMG_MODEL, prompt=prompt, config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio="1:1"))
+            res.generated_images[0].image.save(agent_path)
+
+        # 2. Generate the Background
+        bg_path = os.path.join(studio_dir, "Narrator_BG.png")
+        if not os.path.exists(bg_path):
+            prompt = "Empty background. A dark, cinematic broadcast studio with subtle neon backlighting. No people."
+            res = client.models.generate_images(model=IMG_MODEL, prompt=prompt, config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio="16:9"))
+            res.generated_images[0].image.save(bg_path)
+
+        # 3. Composite! We return the direct output of this function so we know the path is 100% accurate.
+        return self.composite_scene_master(
+            agent_path=agent_path, 
+            bg_path=bg_path, 
+            game_name="Global_Agents", 
+            room_name="Narrator_Studio", 
+            agent_name="Narrator",  # Matches the expected_output_name above
+            facing="north"
+        )
+    
+    def generate_recap_video(self, db_logger, game_name, past_n=3, output_filename="recap.mp4"):
+        """Fetches history, summarizes it, and films the Narrator."""
+        
+        # 1. Fetch History
+        timeline_data = db_logger.get_timeline_history(past_n)
+        if not timeline_data:
+            print("⚠️ No events in the timeline to recap.")
+            return None
+
+        # 2. Format history for the LLM
+        raw_log = ""
+        for scene in timeline_data:
+            raw_log += f"--- Room: {scene['room']} (Tick {scene['tick']}) ---\n"
+            for line in scene['script']:
+                raw_log += f"{line['speaker']}: {line['line']}\n"
+
+        # 3. Write the Script
+        prompt = f"""
+        You are the dramatic narrator of a cinematic web series.
+        Read the following transcript of the previous scenes:
+        {raw_log}
+        Write a short, engaging "Previously on..." recap monologue.
+        Keep it under 3 sentences. Output ONLY the spoken text. No stage directions.
+        """
+        response = client.models.generate_content(model=TEXT_MODEL, contents=prompt)
+        recap_text = f"Previously, in {game_name}... " + response.text.strip()
+        
+        # Format the script exactly how film_scene expects it: [(speaker, line, emotion)]
+        script = []
+        sentences = split_into_sentences(recap_text)
+        for sentence in sentences:
+            script.append(("Narrator", sentence, "serious"))
+
+        # 4. Grab Fixed Asset
+        narrator_img = self.get_fixed_narrator_composite()
+        scene_assets = {"Narrator": narrator_img}
+
+        # 5. Film & Stitch (Reusing your robust pipeline!)
+        print("🎬 Filming Recap Video...")
+        return self.film_scene(script, scene_assets, game_name, "Recap_Studio", output_filename)
 
 class SceneSelector:
 
