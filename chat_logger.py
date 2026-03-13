@@ -764,13 +764,9 @@ class SQLLogger:
         self.conn.close()
 
 def generate_gemini_response(sender, receiver, context, room):
-    """
-    Calls Gemini Pro to generate a dialogue line.
-    """
-    # 1. Get Persona
+    """Calls Gemini Pro to generate a dialogue line with retry logic."""
     personality = NPC_PERSONAS.get(sender, NPC_PERSONAS["DEFAULT"])
     
-    # 2. Build the Prompt
     formatted_prompt = SYSTEM_PROMPT.format(
         sender=sender,
         personality=personality,
@@ -779,19 +775,21 @@ def generate_gemini_response(sender, receiver, context, room):
         context=context if context else "(No previous conversation)"
     )
 
-    try:
-        # 3. Call the Model
-        response = client.models.generate_content(
+    # Retry logic for rate limits / temporary API glitches
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
                 model=model, contents=formatted_prompt
             )
-        
-        # 4. Clean up response (sometimes LLMs add quotes or "Bob: " prefix)
-        clean_text = response.text.strip().replace(f"{sender}:", "").replace('"', '')
-        return clean_text
+            clean_text = response.text.strip().replace(f"{sender}:", "").replace('"', '')
+            return clean_text
+            
+        except Exception as e:
+            print(f"⚠️ API Error for {sender} (Attempt {attempt+1}/3): {e}")
+            time.sleep(2 ** attempt) # Waits 1s, then 2s, then 4s
 
-    except Exception as e:
-        print(f"Gemini API Error: {e}")
-        return "...mumbles inaudibly..."
+    print(f"❌ Gemini API completely failed for {sender}. Skipping turn.")
+    return None
 
 # --- CONTROLLER ---
 
@@ -843,22 +841,22 @@ class JerichoController:
         print(f"\n--- 🗣️  Group Chat in {room}: {occupants} ---")
         
         for i in range(n_rounds):
-            # Simple round-robin: occupants take turns speaking
             speaker = occupants[i % len(occupants)]
             receivers = [o for o in occupants if o != speaker]
             
-            # 1. Get Context
             ctx = self.logger.get_agent_context(speaker)
-            
-            # 2. Generate
             print(f"   [Thinking...] ({speaker})")
+            
             msg = generate_gemini_response(speaker, receivers, ctx, room)
             
-            # 3. Broadcast Log
-            self.logger.log_broadcast(self.tick_count, room, speaker, receivers, msg)
-            print(f"   [{speaker}] to {receivers}: {msg}")
+            # --- THE FIX: Only log and broadcast if we actually got a message ---
+            if msg: 
+                self.logger.log_broadcast(self.tick_count, room, speaker, receivers, msg)
+                print(f"   [{speaker}] to {receivers}: {msg}")
+            else:
+                print(f"   [{speaker}] remains silent due to API limits.")
             
-            time.sleep(1) # Rate limit
+            time.sleep(1)
 
     def step(self):
         self.tick_count += 1
@@ -1011,6 +1009,24 @@ class AutomatedDirector:
             
         return data
 
+    def extract_last_frame(self, video_path, output_image):
+        """Extracts the last frame of a video using ffmpeg."""
+        try:
+            subprocess.run([
+                "ffmpeg",
+                "-y",
+                "-sseof", "-0.1",
+                "-i", video_path,
+                "-vframes", "1",
+                output_image
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            return output_image
+
+        except Exception as e:
+            print(f"❌ Failed extracting last frame: {e}")
+            return None
+
     def create_agent_plate(self, agent_name, agent_desc):
         """Generates a reusable character cutout on a plain background."""
         # We store agents globally, not tied to a specific game, so they persist everywhere
@@ -1148,6 +1164,7 @@ class AutomatedDirector:
             print(f"❌ Compositing failed: {e}")
             
         return None
+
     def prepare_scene_assets(self, room_description, agents, game_name, room_name):
         """Phase 1: Generates the master composited images using your MediaPipe pipeline."""
         room_data = self._design_set_automatically(room_description, game_name, room_name)
@@ -1170,27 +1187,48 @@ class AutomatedDirector:
                 
         return scene_assets
 
-    def film_scene(self, script, scene_assets, game_name, room_name, output_filename):
+    def film_scene(self, script, scene_assets, game_name, room_name, output_filename, continuity=False):
         """Phase 2: Sends the cached MediaPipe composites to Veo."""
+        
         clips = []
+        last_frame_path = None
+
         for i, (speaker, line, emotion) in enumerate(script):
-            if speaker not in scene_assets:
-                print(f"⚠️ Skipping line for {speaker}: No master asset found.")
-                continue
-                
-            print(f"🎥 Filming Line {i+1}/{len(script)}: {speaker}")
-            camera_angle = "Cinematic mid-shot" if i % 2 == 0 else "Cinematic extreme close-up on face"
-            with open(scene_assets[speaker], "rb") as f:
+            # ... (image loading stuff) ...
+            
+            # THE ASTERISK CHECK:
+            line = line.strip()
+            if line.startswith("*") and line.endswith("*"):
+                # It's an action! Remove the asterisks and tell Veo not to move the lips.
+                action = line.strip("*")
+                text_prompt = f"""
+                Cinematic mid-shot.
+                The character looks {emotion}.
+                The character performs the following action: {action}.
+                The character DOES NOT SPEAK. Their mouth remains closed.
+                Cinematic lighting, realistic animation.
+                """
+            else:
+                # It's normal dialogue.
+                camera_angle = "Cinematic mid-shot" if i % 2 == 0 else "Cinematic close-up"
+                text_prompt = f"""
+                {camera_angle}.
+                The character looks {emotion}.
+                The character speaks the following line clearly: "{line}"
+                Cinematic lighting, realistic facial animation.
+                """
+
+            # Choose input image
+            input_image_path = scene_assets[speaker]
+
+            if continuity and last_frame_path:
+                input_image_path = last_frame_path
+
+            with open(input_image_path, "rb") as f:
                 raw_data = f.read()
-            
+
             image_input = types.Image(image_bytes=raw_data, mime_type="image/png")
-            text_prompt = f"""
-            {camera_angle}.
-            The character looks {emotion}.
-            The character speaks the following line clearly: "{line}"
-            Cinematic lighting, realistic facial animation.
-            """
-            
+
             try:
                 operation = client.models.generate_videos(
                     model=VID_MODEL,
@@ -1198,7 +1236,7 @@ class AutomatedDirector:
                     image=image_input,
                     config=types.GenerateVideosConfig(number_of_videos=1, aspect_ratio="16:9")
                 )
-                
+
                 attempts = 0
                 while not operation.done and attempts < 60:
                     time.sleep(5)
@@ -1206,29 +1244,60 @@ class AutomatedDirector:
                     attempts += 1
 
                 if operation.result and operation.result.generated_videos:
+
                     fname = f"clip_{i:03d}_{speaker}.mp4"
-                    downloaded = self._download_video(operation.result.generated_videos[0].video.uri, fname)
+                    downloaded = self._download_video(
+                        operation.result.generated_videos[0].video.uri,
+                        fname
+                    )
+
                     if downloaded:
                         clips.append(downloaded)
+
+                        # Extract last frame for continuity
+                        if continuity:
+                            frame_path = downloaded.replace(".mp4", "_lastframe.png")
+
+                            last_frame = self.extract_last_frame(
+                                downloaded,
+                                frame_path
+                            )
+
+                            if last_frame:
+                                last_frame_path = last_frame
+
             except Exception as e:
                 print(f"❌ Clip failed: {e}")
 
         # Stitch
         if clips:
             print(f"🎞️ Stitching {len(clips)} clips...")
+
             with open(f"ffmpeg_list_{room_name}.txt", "w") as f:
                 for vid in clips:
                     f.write(f"file '{vid}'\n")
-            
-            subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", f"ffmpeg_list_{room_name}.txt", "-c", "copy", output_filename], check=True)
+
+            subprocess.run([
+                "ffmpeg",
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", f"ffmpeg_list_{room_name}.txt",
+                "-c", "copy",
+                output_filename
+            ], check=True)
+
             os.remove(f"ffmpeg_list_{room_name}.txt")
-            
+
             for vid in clips:
-                if os.path.exists(vid): os.remove(vid)
-                    
+                if os.path.exists(vid):
+                    os.remove(vid)
+
             print(f"🍿 Scene Complete: {output_filename}")
             return output_filename
+
         return None
+
     def _download_video(self, video_uri, filename):
         # Helper to download video from URI
         headers = {"x-goog-api-key": GEMINI_API_KEY}
@@ -1355,8 +1424,17 @@ class AutomatedDirector:
         scene_assets = {"Narrator": narrator_img}
 
         # 5. Film & Stitch (Reusing your robust pipeline!)
+        # 5. Film & Stitch (Using continuity mode)
         print("🎬 Filming Recap Video...")
-        return self.film_scene(script, scene_assets, game_name, "Recap_Studio", output_filename)
+
+        return self.film_scene(
+            script,
+            scene_assets,
+            game_name,
+            "Recap_Studio",
+            output_filename,
+            continuity=True
+        )
 
 class SceneSelector:
 

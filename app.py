@@ -33,18 +33,43 @@ def list_games():
 
 @app.route('/game/start', methods=['POST'])
 def start_game():
-    game_file = request.json.get("game_file")
-    safe_filename = os.path.basename(game_file)
+    data = request.json
+    game_filename = data.get("game_file")
+    clear_db = data.get("clear_db", False)  # Check if the user wants to wipe the DB
+    
+    if not game_filename:
+         return jsonify({"error": "No game_file provided in request"}), 400
+    
+    safe_filename = os.path.basename(game_filename)
     game_path = os.path.join(GAMES_DIR, safe_filename)
     
-    session_id = str(uuid.uuid4())
+    if not os.path.exists(game_path):
+        return jsonify({"error": f"Game file '{safe_filename}' not found."}), 404
+
+    # 1. Get the assigned database path
     db_name = db_manager.get_or_create_db(safe_filename)
     
+    # 2. WIPE THE DATABASE IF REQUESTED
+    if clear_db and os.path.exists(db_name):
+        try:
+            os.remove(db_name)
+            print(f"🗑️ Wiped previous database for {safe_filename}")
+        except Exception as e:
+            print(f"⚠️ Could not delete DB file (it might be in use): {e}")
+
+    session_id = str(uuid.uuid4())
+    
+    # 3. Initialize the controller (If we deleted the DB, SQLLogger will instantly recreate a clean one here)
     controller = JerichoController(game_path, db_name)
-    controller.game_name = safe_filename # Store game name
+    controller.game_name = safe_filename 
     active_sessions[session_id] = controller
     
-    return jsonify({"session_id": session_id, "db_name": db_name})
+    return jsonify({
+        "message": "Game started", 
+        "session_id": session_id,
+        "db_name": db_name,
+        "game_used": safe_filename
+    })
 
 @app.route('/game/<session_id>/step', methods=['POST'])
 def step_game(session_id):
