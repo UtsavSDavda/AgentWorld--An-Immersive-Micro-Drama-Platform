@@ -20,7 +20,6 @@ import csv
 from PIL import Image
 import io
 
-# --- NEW IMPORTS FOR MEDIAPIPE ---
 import cv2
 import numpy as np
 import urllib.request
@@ -39,13 +38,6 @@ IMG_MODEL = "imagen-4.0-fast-generate-001"
 VID_MODEL = "veo-3.1-fast-generate-preview"
 TEXT_MODEL = "gemini-2.0-flash"
 video_client = genai.Client(api_key=GEMINI_API_KEY)
-
-NPC_PERSONAS = {
-    "Bob": "You are Bob, a paranoid scientist. You are suspicious of everyone.",
-    "Alice": "You are Alice, a clumsy intern trying to act professional.",
-    "Guard": "You are a grumpy security guard who hates noise.",
-    "DEFAULT": "You are a curious inhabitant of this world."
-}
 
 # --- DATABASE LOGGER ---
 def split_into_sentences(text):
@@ -84,14 +76,6 @@ def create_video(tick,context,prompt):
         print(f"Saved to {name}")
     else:
         print("Video generation failed.")
-
-
-NPC_APPEARANCE = {
-    "Bob": "A middle-aged scientist wearing a white lab coat, messy hair, glasses, nervous expression",
-    "Alice": "A young intern in business casual attire, holding a clipboard, looking slightly confused",
-    "Guard": "A burly security guard in a dark blue uniform, flashlight on belt, stern face",
-    "DEFAULT": "A mysterious figure in shadow"
-}
 
 def produce_video_from_tick(tick, room_name, logger, director):
     """
@@ -162,6 +146,18 @@ def produce_video_from_tick(tick, room_name, logger, director):
     else:
         print("❌ Production failed: No valid clips generated.")
 
+def get_media_duration(file_path):
+    """Returns the duration of a media file in seconds."""
+    try:
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries",
+            "format=duration", "-of",
+            "default=noprint_wrappers=1:nokey=1", file_path
+        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        return float(result.stdout)
+    except Exception as e:
+        print(f"❌ Failed to get duration for {file_path}: {e}")
+        return 0.0
 
 class GameDBManager:
     DB_FOLDER = "GamesDB"
@@ -462,6 +458,27 @@ class SQLLogger:
             UNIQUE(tick, room_name)
         );
         """)
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS npc_profiles (
+            name TEXT PRIMARY KEY,
+            raw_description TEXT,
+            persona TEXT,
+            appearance TEXT
+        );
+        """)
+        self.conn.commit()
+
+    def get_npc_profile(self, name):
+        """Fetches the cached NPC profile from disk. Returns (persona, appearance)"""
+        self.cursor.execute("SELECT persona, appearance FROM npc_profiles WHERE name=?", (name,))
+        return self.cursor.fetchone()
+
+    def save_npc_profile(self, name, raw_desc, persona, appearance):
+        """Saves the AI-generated profile to the database."""
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO npc_profiles (name, raw_description, persona, appearance) VALUES (?, ?, ?, ?)",
+            (name, raw_desc, persona, appearance)
+        )
         self.conn.commit()
 
     def update_room_desc(self, room_name, description, tick):
@@ -763,9 +780,10 @@ class SQLLogger:
     def close(self):
         self.conn.close()
 
-def generate_gemini_response(sender, receiver, context, room):
+def generate_gemini_response(sender, receiver, context, room, db_logger):
     """Calls Gemini Pro to generate a dialogue line with retry logic."""
-    personality = NPC_PERSONAS.get(sender, NPC_PERSONAS["DEFAULT"])
+    profile = db_logger.get_npc_profile(sender)
+    personality = profile[0] if profile else f"You are {sender}."
     
     formatted_prompt = SYSTEM_PROMPT.format(
         sender=sender,
@@ -825,17 +843,69 @@ class JerichoController:
         if count > 0:
             print(f"(Updated descriptions for {count} rooms)")
 
+    def parse_npc_data(self, observation_text):
+            pattern = re.compile(
+                r"DATA_NPC:\s*(.*?)\s*\|\s*(.*?)(?=DATA_NPC|--- END NPC DATA ---|$)",
+                re.DOTALL
+            )
+            for match in pattern.finditer(observation_text):
+                npc_name = match.group(1).strip()
+                raw_desc = match.group(2).strip()
+                
+                # If they aren't in the database yet, onboard them!
+                if not self.logger.get_npc_profile(npc_name):
+                    self.onboard_new_npc(npc_name, raw_desc)
 
     def update_world_state(self):
+        """Inspects the Z-Machine memory to get the state of rooms and NPCs."""
+        # 1. Update Rooms
+        obs_rooms, _, _, _ = self.env.step("dump rooms")
+        self.parse_room_data(obs_rooms)
+        
+        # 2. Update NPCs
+        obs_npcs, _, _, _ = self.env.step("dump agents")
+        self.parse_npc_data(obs_npcs)
+
+    def onboard_new_npc(self, npc_name, raw_game_description):
+        """Checks DB for NPC. If missing, invents their persona and caches it."""
+        print(f"👤 New Character Detected: {npc_name}. Generating profile...")
+
+        prompt = f"""
+        You are a character designer for a cinematic video game.
+        Character Name: "{npc_name}"
+        In-game description: "{raw_game_description}"
+        
+        Create two things:
+        1. "persona": A 2-sentence psychological profile detailing how they speak, their motivations, and attitude. Start with "You are {npc_name}..."
+        2. "appearance": A strict, 1-sentence visual description for an AI image generator (e.g., clothing, age, defining features).
+        
+        Return ONLY valid JSON:
+        {{
+            "persona": "...",
+            "appearance": "..."
+        }}
         """
-        Inspects the Z-Machine memory to get the 'True' state of every room
-        and updates the room_desc table.
-        """
-        # 1. Get all objects
-        obs, _, _, _ = self.env.step("dump rooms")
-        print(obs)
-        # Parse and Store
-        self.parse_room_data(obs)
+        
+        try:
+            response = client.models.generate_content(
+                model=TEXT_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            
+            import json
+            data = json.loads(response.text)
+            persona = data.get("persona", f"You are {npc_name}.")
+            appearance = data.get("appearance", f"A cinematic portrait of {npc_name}.")
+            
+            # Save to Disk!
+            self.logger.save_npc_profile(npc_name, raw_game_description, persona, appearance)
+            print(f"✅ Saved profile for {npc_name} to database.")
+            
+        except Exception as e:
+            print(f"❌ Failed to generate profile for {npc_name}: {e}")
+            # Fallback so it doesn't crash the game
+            self.logger.save_npc_profile(npc_name, raw_game_description, f"You are {npc_name}.", f"A character named {npc_name}.")
 
     def conduct_group_chat(self, occupants: List[str], room: str, n_rounds=3):
         print(f"\n--- 🗣️  Group Chat in {room}: {occupants} ---")
@@ -847,7 +917,7 @@ class JerichoController:
             ctx = self.logger.get_agent_context(speaker)
             print(f"   [Thinking...] ({speaker})")
             
-            msg = generate_gemini_response(speaker, receivers, ctx, room)
+            msg = generate_gemini_response(speaker, receivers, ctx, room, self.logger)
             
             # --- THE FIX: Only log and broadcast if we actually got a message ---
             if msg: 
@@ -1042,7 +1112,8 @@ class AutomatedDirector:
         prompt = f"""
         Cinematic mid-shot of {agent_desc}.
         The character is facing the camera.
-        Shot in a brightly lit studio with a solid, flat grey background.
+        ENVIRONMENT: ISOLATED CHARACTER ON A SOLID, FLAT, LIGHT GREY BACKGROUND. 
+        Absolutely no scenery, no props, no background objects. Clean studio lighting.
         """
         
         print(f"📸 Photographing Agent: {agent_name}...")
