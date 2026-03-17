@@ -101,9 +101,15 @@ def get_candidates(session_id):
             if line["speaker"] not in speakers:
                 # Assign the next wall based on how many speakers we already have
                 assigned_wall = directions[len(speakers) % 4]
-                agents.append({"name": line["speaker"], "desc": f"A character", "facing": assigned_wall})
+                profile = video_logger.get_npc_profile(line["speaker"])
+                print(profile)
+                appearance = profile[1] if profile else f"A character named {line['speaker']}"
+                agents.append({
+                    "name": line["speaker"], 
+                    "desc": appearance,  # Passes the exact visual prompt!
+                    "facing": assigned_wall
+                })
                 speakers.add(line["speaker"])
-        
         # This calls your new MediaPipe pipeline!
         scene_assets = director.prepare_scene_assets(scene_data["visual"], agents, controller.game_name, room)
         

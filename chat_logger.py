@@ -1259,18 +1259,19 @@ class AutomatedDirector:
         return scene_assets
 
     def film_scene(self, script, scene_assets, game_name, room_name, output_filename, continuity=False):
-        """Phase 2: Sends the cached MediaPipe composites to Veo."""
+        """Phase 2: Sends the cached MediaPipe composites to Veo and syncs TTS."""
         
         clips = []
         last_frame_path = None
 
         for i, (speaker, line, emotion) in enumerate(script):
-            # ... (image loading stuff) ...
             
-            # THE ASTERISK CHECK:
             line = line.strip()
-            if line.startswith("*") and line.endswith("*"):
-                # It's an action! Remove the asterisks and tell Veo not to move the lips.
+            is_action = line.startswith("*") and line.endswith("*")
+
+            # 1. Prepare the Veo Prompt
+            if is_action:
+                # It's an action! Remove asterisks and tell Veo not to move lips.
                 action = line.strip("*")
                 text_prompt = f"""
                 Cinematic mid-shot.
@@ -1301,6 +1302,7 @@ class AutomatedDirector:
             image_input = types.Image(image_bytes=raw_data, mime_type="image/png")
 
             try:
+                # 2. Generate Video with Veo
                 operation = client.models.generate_videos(
                     model=VID_MODEL,
                     prompt=text_prompt,
@@ -1315,32 +1317,43 @@ class AutomatedDirector:
                     attempts += 1
 
                 if operation.result and operation.result.generated_videos:
-
-                    fname = f"clip_{i:03d}_{speaker}.mp4"
+                    raw_vid_fname = f"raw_clip_{i:03d}_{speaker}.mp4"
                     downloaded = self._download_video(
                         operation.result.generated_videos[0].video.uri,
-                        fname
+                        raw_vid_fname
                     )
 
                     if downloaded:
-                        clips.append(downloaded)
+                        tts_fname = f"audio_{i:03d}_{speaker}.mp3"
+                        final_sync_fname = f"sync_clip_{i:03d}_{speaker}.mp4"
+                        
+                        # 3. Generate the TTS Audio
+                        audio_success = self.generate_tts_audio(speaker, line, tts_fname)
+                        
+                        # 4. Sync Audio and Video (or fallback for silent actions)
+                        if audio_success and os.path.exists(tts_fname):
+                            self._sync_audio_video(downloaded, tts_fname, final_sync_fname)
+                            clips.append(final_sync_fname)
+                            
+                            # Clean up intermediate files
+                            if os.path.exists(downloaded): os.remove(downloaded)
+                            if os.path.exists(tts_fname): os.remove(tts_fname)
+                        else:
+                            # If it's an action line or API failed, just use raw video
+                            clips.append(downloaded)
+                            final_sync_fname = downloaded 
 
-                        # Extract last frame for continuity
+                        # 5. Extract last frame for continuity
                         if continuity:
-                            frame_path = downloaded.replace(".mp4", "_lastframe.png")
-
-                            last_frame = self.extract_last_frame(
-                                downloaded,
-                                frame_path
-                            )
-
+                            frame_path = final_sync_fname.replace(".mp4", "_lastframe.png")
+                            last_frame = self.extract_last_frame(final_sync_fname, frame_path)
                             if last_frame:
                                 last_frame_path = last_frame
 
             except Exception as e:
                 print(f"❌ Clip failed: {e}")
 
-        # Stitch
+        # 6. Stitch the final scene
         if clips:
             print(f"🎞️ Stitching {len(clips)} clips...")
 
@@ -1356,7 +1369,7 @@ class AutomatedDirector:
                 "-i", f"ffmpeg_list_{room_name}.txt",
                 "-c", "copy",
                 output_filename
-            ], check=True)
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             os.remove(f"ffmpeg_list_{room_name}.txt")
 
@@ -1506,6 +1519,156 @@ class AutomatedDirector:
             output_filename,
             continuity=True
         )
+
+    def generate_tts_audio(self, speaker, text, output_filename):
+        """Generates TTS using ElevenLabs and saves it as a .wav or .mp3."""
+        # 1. Skip audio generation for silent action lines
+        if text.strip().startswith("*") and text.strip().endswith("*"):
+            print(f"🔇 Skipping TTS for action: {text}")
+            return False
+
+        # 2. Map your Jericho agents to specific ElevenLabs Voice IDs
+        # Find these IDs in your ElevenLabs dashboard VoiceLab
+        voice_map = {
+        "Jon": "CwhRBWXzGAHq8TQ4Fs17", # american
+        "Sarah - Mature, Reassuring, Confident": "EXAVITQu4vr4xnSDxMaL", # american
+        "Laura - Enthusiast, Quirky Attitude": "FGY2WhTYpPnrIDTdsKH5", # american
+        "Charlie - Deep, Confident, Energetic": "IKne3meq5aSn9XLyUdCD", # australian
+        "George - Warm, Captivating Storyteller": "JBFqnCBsd6RMkjVDRZzb", # british
+        "Callum - Husky Trickster": "N2lVS1w4EtoT3dr4eOWO", # american
+        "River - Relaxed, Neutral, Informative": "SAz9YHcvj6GT2YYXdXww", # american
+        "Harry - Fierce Warrior": "SOYHLrjzK2X1ezoPC6cr", # american
+        "Liam - Energetic, Social Media Creator": "TX3LPaxmHKxFdv7VOQHJ", # american
+        "Alice": "Xb7hH8MSUJpSbSDYk0k2", # british
+        "Matilda - Knowledgable, Professional": "XrExE9yKIg1WjnnlVkGX", # american
+        "Will - Relaxed Optimist": "bIHbv24MWmeRgasZH58o", # american
+        "Jessica - Playful, Bright, Warm": "cgSgspJ2msm6clMCkdW9", # american
+        "Eric - Smooth, Trustworthy": "cjVigY5qzO86Huf0OWal", # american
+        "Bella - Professional, Bright, Warm": "hpp4J3VqNfWAUOO0d1Us", # american
+        "Chris - Charming, Down-to-Earth": "iP95p4xoKVk53GoZ742B", # american
+        "Brian - Deep, Resonant and Comforting": "nPczCjzI2devNBz1zQrb", # american
+        "Daniel - Steady Broadcaster": "onwK4e9ZLuTAKqWW03F9", # british
+        "Lily - Velvety Actress": "pFZP5JQG7iQjIQuC4Bku", # british
+        "Adam - Dominant, Firm": "pNInz6obpgDQGcFmaJgB", # american
+        "Bob": "pqHfZKP75CvOlQylNhV4", # american
+        }
+        print(voice_map.get("Alice"))
+        voice_id = voice_map.get(speaker, list(voice_map.values())[0])
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+
+        # Make sure ELEVENLABS_API_KEY is in your environment variables
+        api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+        if not api_key:
+            print("❌ Error: ELEVENLABS_API_KEY not found in environment.")
+            return False
+
+        headers = {
+            "Accept": "audio/mpeg",
+            "Content-Type": "application/json",
+            "xi-api-key": api_key
+        }
+
+        # We use the multilingual v2 model as it tends to be the most emotive
+        data = {
+            "text": text,
+            "model_id": "eleven_multilingual_v2", 
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+                "style": 0.0,
+                "use_speaker_boost": True
+            }
+        }
+
+        print(f"🎙️ Recording ElevenLabs TTS for {speaker}...")
+        try:
+            response = requests.post(url, json=data, headers=headers)
+            response.raise_for_status() # Throws an exception for 4xx/5xx errors
+            
+            with open(output_filename, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk:
+                        f.write(chunk)
+            
+            print(f"✅ Audio saved to {output_filename}")
+            return True
+            
+        except requests.exceptions.RequestException as e:
+            print(f"❌ ElevenLabs API Error: {e}")
+            # If you print response.text here, it usually contains the specific API error message
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Details: {e.response.text}")
+            return False
+
+    def _get_media_duration(self, file_path):
+        """Returns the duration of a media file in seconds using ffprobe."""
+        try:
+            result = subprocess.run([
+                "ffprobe", "-v", "error", "-show_entries",
+                "format=duration", "-of",
+                "default=noprint_wrappers=1:nokey=1", file_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True)
+            return float(result.stdout.strip())
+        except Exception as e:
+            print(f"❌ Failed to get duration for {file_path}: {e}")
+            return 0.0
+
+    def _sync_audio_video(self, video_path, audio_path, output_path):
+        """Applies heuristics to sync TTS audio with generated video."""
+        vid_dur = self._get_media_duration(video_path)
+        aud_dur = self._get_media_duration(audio_path)
+
+        if vid_dur == 0 or aud_dur == 0:
+            print("⚠️ Invalid media durations, falling back to basic overlay.")
+            subprocess.run(["ffmpeg", "-y", "-i", video_path, "-i", audio_path, "-c:v", "copy", "-c:a", "aac", "-shortest", output_path], check=True)
+            return
+
+        # The 15% Heuristic
+        difference_ratio = abs(vid_dur - aud_dur) / aud_dur
+
+        print(f"⚖️ Syncing: Video is {vid_dur:.2f}s, Audio is {aud_dur:.2f}s (Diff: {difference_ratio:.1%})")
+
+        try:
+            if difference_ratio <= 0.15:
+                # Scenario A: Stretch/Compress Audio (Less than 15% difference)
+                print("   ➔ Difference is small. Adjusting audio tempo.")
+                speed_factor = aud_dur / vid_dur 
+                subprocess.run([
+                    "ffmpeg", "-y", 
+                    "-i", video_path, "-i", audio_path, 
+                    "-c:v", "copy", 
+                    "-af", f"atempo={speed_factor}", 
+                    "-map", "0:v:0", "-map", "1:a:0", 
+                    output_path
+                ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            elif vid_dur > aud_dur:
+                # Scenario B: Video is much longer than audio -> Cut video early
+                print("   ➔ Video is too long. Cutting video to match audio length.")
+                subprocess.run([
+                    "ffmpeg", "-y", 
+                    "-i", video_path, "-i", audio_path, 
+                    "-c:v", "copy", "-c:a", "aac", 
+                    "-map", "0:v:0", "-map", "1:a:0", 
+                    "-shortest", 
+                    output_path
+                ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            else:
+                # Scenario C: Audio is much longer than video -> Freeze last frame of video
+                print("   ➔ Audio is too long. Freezing last frame of video.")
+                subprocess.run([
+                    "ffmpeg", "-y", 
+                    "-i", video_path, "-i", audio_path, 
+                    "-filter_complex", "[0:v]tpad=stop_mode=clone:stop_duration=10[v]", 
+                    "-map", "[v]", "-map", "1:a:0", 
+                    "-c:v", "libx264", "-c:a", "aac", 
+                    "-shortest", 
+                    output_path
+                ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        except subprocess.CalledProcessError as e:
+            print(f"❌ FFmpeg sync failed: {e}")
 
 class SceneSelector:
 
