@@ -140,6 +140,7 @@ def render_status(filename):
 def render_video(session_id):
     data = request.json
     tick, room_name = data.get("tick"), data.get("room")
+    mode = data.get("mode", "full") # Added mode parameter
     
     controller = active_sessions.get(session_id)
     if not controller: return jsonify({"error": "Invalid session"}), 404
@@ -156,28 +157,37 @@ def render_video(session_id):
     videomaker = SceneSelector(db=video_logger, director=director, key_terms=[], game_name=controller.game_name)
 
     for line in scene_data["script"]:
+        speaker = line["speaker"]
+        text = line["line"]
         emotion = videomaker._detect_emotion_nrc(line["line"]) 
-        formatted_script.append((line["speaker"], line["line"], emotion))
-        if line["speaker"] not in speakers:
+        voice_id = video_logger.get_npc_voice(speaker)
+        formatted_script.append((speaker, text, emotion, voice_id))
+        if speaker not in speakers:
             assigned_wall = directions[len(speakers) % 4]
-            agents.append({"name": line["speaker"], "desc": f"A character", "facing": assigned_wall})
-            speakers.add(line["speaker"])
+            agents.append({"name": speaker, "desc": "A character", "facing": assigned_wall})
+            speakers.add(speaker)
 
-    # Define the exact filename so the frontend knows what to look for
     safe_room = room_name.replace(" ", "_").replace("'", "")
-    filename = f"final_render_{controller.game_name}_{safe_room}_tick{tick}.mp4"
+    
+    # Change filename prefix based on the mode so they don't overwrite each other
+    prefix = "animatic" if mode == "stills" else "final_render"
+    filename = f"{prefix}_{controller.game_name}_{safe_room}_tick{tick}.mp4"
     output_path = os.path.join(OUTPUT_DIR, filename)
 
     def run_film_job():
         scene_assets = director.prepare_scene_assets(scene_data["visual"], agents, controller.game_name, room_name)
-        # Pass the full output path (including the Output_Videos folder) to the director
-        director.film_scene(formatted_script, scene_assets, controller.game_name, room_name, output_path)
+        
+        # Branch logic based on user selection
+        if mode == "stills":
+            director.film_scene_stills(formatted_script, scene_assets, controller.game_name, room_name, output_path)
+        else:
+            director.film_scene(formatted_script, scene_assets, controller.game_name, room_name, output_path)
+            
         video_logger.close()
-        print(f"✅ Final video saved to {output_path}")
+        print(f"✅ Video saved to {output_path}")
 
     threading.Thread(target=run_film_job).start()
     
-    # Return the expected filename to the frontend
     return jsonify({
         "message": f"Render started for Tick {tick}!", 
         "video_filename": filename 

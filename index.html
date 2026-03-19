@@ -172,16 +172,17 @@
                     const safeRoomName = scene.room.replace(/'/g, "\\'");
 
                     finalHtml += `
-                    <div class="panel" style="background:#222">
-                        <h3>Room: ${scene.room} (Tick ${scene.tick}) | Drama Score: ${scene.score.toFixed(1)}</h3>
-                        <div class="image-gallery">${imgTags}</div>
-                        <div class="script-box">${scriptTags}</div>
-                        
-                        <div class="flex">
-                            <button onclick="triggerRender(${scene.tick}, '${safeRoomName}', this)">🎬 Render Final Video</button>
-                            <button onclick="addToTimeline(${scene.tick}, '${safeRoomName}', this)" style="background: #28a745;">📌 Add to Official Timeline</button>
-                        </div>
-                    </div>`;
+                <div class="panel" style="background:#222">
+                    <h3>Room: ${scene.room} (Tick ${scene.tick}) | Drama Score: ${scene.score.toFixed(1)}</h3>
+                    <div class="image-gallery">${imgTags}</div>
+                    <div class="script-box">${scriptTags}</div>
+                    
+                    <div class="flex">
+                        <button onclick="triggerRender(${scene.tick}, '${safeRoomName}', this, 'stills')" style="background: #17a2b8;">🖼️ Generate Still + TTS</button>
+                        <button onclick="triggerRender(${scene.tick}, '${safeRoomName}', this, 'full')">🎬 Render Final Video (Veo)</button>
+                        <button onclick="addToTimeline(${scene.tick}, '${safeRoomName}', this)" style="background: #28a745;">📌 Add to Official Timeline</button>
+                    </div>
+                </div>`;
                 });
                 
                 // Inject the final string all at once
@@ -194,10 +195,10 @@
             }
         }
 
-        async function triggerRender(tick, room, btnElement) {
+        async function triggerRender(tick, room, btnElement, mode = 'full') {
             // 1. Lock the button and show loading state
             btnElement.disabled = true;
-            btnElement.innerText = "🎬 Initiating Render...";
+            btnElement.innerText = mode === 'stills' ? "🖼️ Stitching Animatic..." : "🎬 Initiating Render...";
             btnElement.style.background = "#555";
 
             try {
@@ -205,13 +206,13 @@
                 const res = await fetch(`${API_BASE}/game/${sessionId}/render`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ tick: tick, room: room })
+                    body: JSON.stringify({ tick: tick, room: room, mode: mode }) // Pass mode here
                 });
                 
                 const data = await res.json();
                 const expectedFilename = data.video_filename;
                 
-                btnElement.innerText = "⏳ Rendering Video... (This takes a few minutes)";
+                btnElement.innerText = mode === 'stills' ? "⏳ Processing Audio..." : "⏳ Rendering Video... (Takes minutes)";
                 
                 // 3. Start polling the server every 5 seconds
                 const pollInterval = setInterval(async () => {
@@ -222,9 +223,11 @@
                     if (statusData.status === "done") {
                         clearInterval(pollInterval);
                         
+                        const title = mode === 'stills' ? "✅ Animatic Complete" : "✅ Final Render Complete";
+                        
                         const videoHtml = `
                             <div style="margin-top: 15px; background: #000; padding: 10px; border-radius: 8px; border: 2px solid #007bff;">
-                                <h4 style="margin: 0 0 10px 0;">✅ Final Render Complete</h4>
+                                <h4 style="margin: 0 0 10px 0;">${title}</h4>
                                 <video width="100%" controls autoplay style="border-radius: 4px;">
                                     <source src="${API_BASE}${statusData.video_url}" type="video/mp4">
                                     Your browser does not support the video tag.
@@ -234,7 +237,7 @@
                         // Replace the button entirely with the video player
                         btnElement.outerHTML = videoHtml;
                     }
-                }, 5000); // 5000 milliseconds = 5 seconds
+                }, 5000);
 
             } catch (error) {
                 console.error("Error triggering render:", error);

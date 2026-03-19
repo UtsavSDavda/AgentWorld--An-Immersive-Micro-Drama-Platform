@@ -19,7 +19,7 @@ from nrclex import NRCLex
 import csv 
 from PIL import Image
 import io
-
+import base64
 import cv2
 import numpy as np
 import urllib.request
@@ -158,6 +158,59 @@ def get_media_duration(file_path):
     except Exception as e:
         print(f"❌ Failed to get duration for {file_path}: {e}")
         return 0.0
+
+
+def fetch_gcp_casting_menu(output_file="gcp_voices.json"):
+    api_key = os.getenv("GCP_API_KEY", "")
+    if not api_key:
+        print("❌ Error: GCP_API_KEY not found in environment variables.")
+        return
+        
+    url = f"https://texttospeech.googleapis.com/v1/voices?key={api_key}"
+    
+    print("📋 Fetching voice catalog from Google Cloud...")
+    response = requests.get(url)
+    
+    if response.status_code != 200:
+        print(f"❌ Failed to fetch voices: {response.text}")
+        return
+
+    all_voices = response.json().get("voices", [])
+    
+    # We only want premium English voices for cinematic quality
+    premium_tiers = ["Journey", "Neural2", "Studio"]
+    catalog = {"MALE": [], "FEMALE": [], "NEUTRAL": []}
+    
+    for v in all_voices:
+        name = v["name"]
+        gender = v.get("ssmlGender", "NEUTRAL")
+        lang = v["languageCodes"][0]
+        
+        # Filter for English and Premium models
+        if "en-" in lang and any(tier in name for tier in premium_tiers):
+            catalog[gender].append(name)
+
+    with open(output_file, 'w') as f:
+        json.dump(catalog, f, indent=4)
+        
+    print(f"✅ Saved premium voice catalog to {output_file}")
+    print(f"Found {len(catalog['MALE'])} Male, {len(catalog['FEMALE'])} Female, and {len(catalog['NEUTRAL'])} Neutral voices.")
+
+def cast_random_gcp_voice(gender, catalog_path="gcp_voices.json"):
+    """Randomly selects a voice from the catalog based on gender."""
+    target_gender = "FEMALE" if gender.upper() == "FEMALE" else "MALE"
+        
+    try:
+        with open(catalog_path, 'r') as f:
+            catalog = json.load(f)
+    except FileNotFoundError:
+        return "en-US-Neural2-J" # Ultimate fallback
+        
+    available_voices = catalog.get(target_gender, [])
+    if not available_voices:
+        return "en-US-Neural2-J"
+        
+    return random.choice(available_voices)
 
 class GameDBManager:
     DB_FOLDER = "GamesDB"
@@ -463,7 +516,9 @@ class SQLLogger:
             name TEXT PRIMARY KEY,
             raw_description TEXT,
             persona TEXT,
-            appearance TEXT
+            appearance TEXT,
+            gender TEXT,
+            voice_id TEXT
         );
         """)
         self.conn.commit()
@@ -473,13 +528,19 @@ class SQLLogger:
         self.cursor.execute("SELECT persona, appearance FROM npc_profiles WHERE name=?", (name,))
         return self.cursor.fetchone()
 
-    def save_npc_profile(self, name, raw_desc, persona, appearance):
-        """Saves the AI-generated profile to the database."""
+    def save_npc_profile(self, name, raw_desc, persona, appearance, gender="NEUTRAL", voice_id="en-US-Neural2-J"):
+        """Saves the AI-generated profile and permanent voice to the database."""
         self.cursor.execute(
-            "INSERT OR REPLACE INTO npc_profiles (name, raw_description, persona, appearance) VALUES (?, ?, ?, ?)",
-            (name, raw_desc, persona, appearance)
+            "INSERT OR REPLACE INTO npc_profiles (name, raw_description, persona, appearance, gender, voice_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (name, raw_desc, persona, appearance, gender, voice_id)
         )
         self.conn.commit()
+    
+    def get_npc_voice(self, name):
+        """Fetches the cached GCP voice ID for a specific character."""
+        self.cursor.execute("SELECT voice_id FROM npc_profiles WHERE name=?", (name,))
+        result = self.cursor.fetchone()
+        return result[0] if result else "en-US-Neural2-J"
 
     def update_room_desc(self, room_name, description, tick):
         # We now store a snapshot for every tick
@@ -875,14 +936,16 @@ class JerichoController:
         Character Name: "{npc_name}"
         In-game description: "{raw_game_description}"
         
-        Create two things:
+        Create three things:
         1. "persona": A 2-sentence psychological profile detailing how they speak, their motivations, and attitude. Start with "You are {npc_name}..."
-        2. "appearance": A strict, 1-sentence visual description for an AI image generator (e.g., clothing, age, defining features).
+        2. "appearance": A strict, 1-sentence visual description for an AI image generator.
+        3. "gender": Determine the gender based on the name and description. Output exactly "MALE", "FEMALE", or "NEUTRAL".
         
         Return ONLY valid JSON:
         {{
             "persona": "...",
-            "appearance": "..."
+            "appearance": "...",
+            "gender": "..."
         }}
         """
         
@@ -893,19 +956,21 @@ class JerichoController:
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
             
-            import json
             data = json.loads(response.text)
             persona = data.get("persona", f"You are {npc_name}.")
             appearance = data.get("appearance", f"A cinematic portrait of {npc_name}.")
+            gender = data.get("gender", "NEUTRAL").upper()
             
-            # Save to Disk!
-            self.logger.save_npc_profile(npc_name, raw_game_description, persona, appearance)
-            print(f"✅ Saved profile for {npc_name} to database.")
+            # ⚠️ AUTOMATED CASTING
+            voice_id = cast_random_gcp_voice(gender)
+            
+            # Save everything to Disk!
+            self.logger.save_npc_profile(npc_name, raw_game_description, persona, appearance, gender, voice_id)
+            print(f"✅ Saved profile for {npc_name} (Voice: {voice_id}) to database.")
             
         except Exception as e:
             print(f"❌ Failed to generate profile for {npc_name}: {e}")
-            # Fallback so it doesn't crash the game
-            self.logger.save_npc_profile(npc_name, raw_game_description, f"You are {npc_name}.", f"A character named {npc_name}.")
+            self.logger.save_npc_profile(npc_name, raw_game_description, f"You are {npc_name}.", f"A character named {npc_name}.", "NEUTRAL", "en-US-Neural2-J")
 
     def conduct_group_chat(self, occupants: List[str], room: str, n_rounds=3):
         print(f"\n--- 🗣️  Group Chat in {room}: {occupants} ---")
@@ -1264,7 +1329,7 @@ class AutomatedDirector:
         clips = []
         last_frame_path = None
 
-        for i, (speaker, line, emotion) in enumerate(script):
+        for i, (speaker, line, emotion, voice_id) in enumerate(script):
             
             line = line.strip()
             is_action = line.startswith("*") and line.endswith("*")
@@ -1328,7 +1393,7 @@ class AutomatedDirector:
                         final_sync_fname = f"sync_clip_{i:03d}_{speaker}.mp4"
                         
                         # 3. Generate the TTS Audio
-                        audio_success = self.generate_tts_audio(speaker, line, tts_fname)
+                        audio_success = self.generate_tts_audio(speaker, line, tts_fname, voice_id)
                         
                         # 4. Sync Audio and Video (or fallback for silent actions)
                         if audio_success and os.path.exists(tts_fname):
@@ -1381,7 +1446,80 @@ class AutomatedDirector:
             return output_filename
 
         return None
+    
+    def film_scene_stills(self, script, scene_assets, game_name, room_name, output_filename):
+        """Phase 2 Alternative: Generates an animatic using static images and TTS (No Veo)."""
+        clips = []
 
+        for i, (speaker, line, emotion, voice_id) in enumerate(script):
+            line = line.strip()
+            is_action = line.startswith("*") and line.endswith("*")
+            
+            input_image_path = scene_assets[speaker]
+            final_sync_fname = f"animatic_clip_{i:03d}_{speaker}.mp4"
+
+            try:
+                if is_action:
+                    # Action lines: Just show the character silently for 3 seconds
+                    subprocess.run([
+                        "ffmpeg", "-y", "-loop", "1", "-i", input_image_path,
+                        "-c:v", "libx264", "-t", "3", "-pix_fmt", "yuv420p",
+                        final_sync_fname
+                    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    clips.append(final_sync_fname)
+                else:
+                    tts_fname = f"audio_{i:03d}_{speaker}.mp3"
+                    
+                    # Generate the TTS Audio
+                    audio_success = self.generate_tts_audio(speaker, line, tts_fname, voice_id)
+                    
+                    if audio_success and os.path.exists(tts_fname):
+                        # Combine looped image with audio
+                        subprocess.run([
+                            "ffmpeg", "-y", "-loop", "1", "-i", input_image_path,
+                            "-i", tts_fname,
+                            "-c:v", "libx264", "-c:a", "aac", "-b:a", "192k",
+                            "-pix_fmt", "yuv420p", "-shortest",
+                            final_sync_fname
+                        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        
+                        clips.append(final_sync_fname)
+                        if os.path.exists(tts_fname): os.remove(tts_fname)
+                    else:
+                        # Fallback: 3 seconds of silence if TTS fails
+                        subprocess.run([
+                            "ffmpeg", "-y", "-loop", "1", "-i", input_image_path,
+                            "-c:v", "libx264", "-t", "3", "-pix_fmt", "yuv420p",
+                            final_sync_fname
+                        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        clips.append(final_sync_fname)
+
+            except Exception as e:
+                print(f"❌ Animatic Clip failed: {e}")
+
+        # Stitch the final animatic scene
+        if clips:
+            print(f"🎞️ Stitching {len(clips)} animatic clips...")
+            list_file = f"ffmpeg_list_{room_name}_animatic.txt"
+            
+            with open(list_file, "w") as f:
+                for vid in clips:
+                    f.write(f"file '{vid}'\n")
+
+            subprocess.run([
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", list_file, "-c", "copy", output_filename
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            os.remove(list_file)
+            for vid in clips:
+                if os.path.exists(vid): os.remove(vid)
+
+            print(f"🍿 Animatic Complete: {output_filename}")
+            return output_filename
+
+        return None
+        
     def _download_video(self, video_uri, filename):
         # Helper to download video from URI
         headers = {"x-goog-api-key": GEMINI_API_KEY}
@@ -1520,84 +1658,48 @@ class AutomatedDirector:
             continuity=True
         )
 
-    def generate_tts_audio(self, speaker, text, output_filename):
-        """Generates TTS using ElevenLabs and saves it as a .wav or .mp3."""
-        # 1. Skip audio generation for silent action lines
+    def generate_tts_audio(self, speaker, text, output_filename, voice_name):
+        """Generates TTS using Google Cloud TTS and saves it as an .mp3."""
         if text.strip().startswith("*") and text.strip().endswith("*"):
             print(f"🔇 Skipping TTS for action: {text}")
             return False
 
-        # 2. Map your Jericho agents to specific ElevenLabs Voice IDs
-        # Find these IDs in your ElevenLabs dashboard VoiceLab
-        voice_map = {
-        "Jon": "CwhRBWXzGAHq8TQ4Fs17", # american
-        "Sarah - Mature, Reassuring, Confident": "EXAVITQu4vr4xnSDxMaL", # american
-        "Laura - Enthusiast, Quirky Attitude": "FGY2WhTYpPnrIDTdsKH5", # american
-        "Charlie - Deep, Confident, Energetic": "IKne3meq5aSn9XLyUdCD", # australian
-        "George - Warm, Captivating Storyteller": "JBFqnCBsd6RMkjVDRZzb", # british
-        "Callum - Husky Trickster": "N2lVS1w4EtoT3dr4eOWO", # american
-        "River - Relaxed, Neutral, Informative": "SAz9YHcvj6GT2YYXdXww", # american
-        "Harry - Fierce Warrior": "SOYHLrjzK2X1ezoPC6cr", # american
-        "Liam - Energetic, Social Media Creator": "TX3LPaxmHKxFdv7VOQHJ", # american
-        "Alice": "Xb7hH8MSUJpSbSDYk0k2", # british
-        "Matilda - Knowledgable, Professional": "XrExE9yKIg1WjnnlVkGX", # american
-        "Will - Relaxed Optimist": "bIHbv24MWmeRgasZH58o", # american
-        "Jessica - Playful, Bright, Warm": "cgSgspJ2msm6clMCkdW9", # american
-        "Eric - Smooth, Trustworthy": "cjVigY5qzO86Huf0OWal", # american
-        "Bella - Professional, Bright, Warm": "hpp4J3VqNfWAUOO0d1Us", # american
-        "Chris - Charming, Down-to-Earth": "iP95p4xoKVk53GoZ742B", # american
-        "Brian - Deep, Resonant and Comforting": "nPczCjzI2devNBz1zQrb", # american
-        "Daniel - Steady Broadcaster": "onwK4e9ZLuTAKqWW03F9", # british
-        "Lily - Velvety Actress": "pFZP5JQG7iQjIQuC4Bku", # british
-        "Adam - Dominant, Firm": "pNInz6obpgDQGcFmaJgB", # american
-        "Bob": "pqHfZKP75CvOlQylNhV4", # american
-        }
-        print(voice_map.get("Alice"))
-        voice_id = voice_map.get(speaker, list(voice_map.values())[0])
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-
-        # Make sure ELEVENLABS_API_KEY is in your environment variables
-        api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+        api_key = os.environ.get("GCP_API_KEY", "")
         if not api_key:
-            print("❌ Error: ELEVENLABS_API_KEY not found in environment.")
+            print("❌ Error: GCP_API_KEY not found in environment.")
             return False
 
-        headers = {
-            "Accept": "audio/mpeg",
-            "Content-Type": "application/json",
-            "xi-api-key": api_key
+        if not voice_name:
+            voice_name = "en-US-Neural2-J" 
+
+        language_code = "-".join(voice_name.split("-")[:2])
+
+        url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={api_key}"
+        payload = {
+            "input": {"text": text},
+            "voice": {"languageCode": language_code, "name": voice_name},
+            "audioConfig": {"audioEncoding": "MP3"}
         }
 
-        # We use the multilingual v2 model as it tends to be the most emotive
-        data = {
-            "text": text,
-            "model_id": "eleven_multilingual_v2", 
-            "voice_settings": {
-                "stability": 0.5,
-                "similarity_boost": 0.75,
-                "style": 0.0,
-                "use_speaker_boost": True
-            }
-        }
-
-        print(f"🎙️ Recording ElevenLabs TTS for {speaker}...")
+        print(f"🎙️ Recording GCP TTS for {speaker} ({voice_name})...")
         try:
-            response = requests.post(url, json=data, headers=headers)
-            response.raise_for_status() # Throws an exception for 4xx/5xx errors
+            response = requests.post(url, json=payload)
+            response.raise_for_status() 
             
-            with open(output_filename, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=1024):
-                    if chunk:
-                        f.write(chunk)
+            response_data = response.json()
+            audio_content_b64 = response_data.get("audioContent")
             
-            print(f"✅ Audio saved to {output_filename}")
-            return True
-            
-        except requests.exceptions.RequestException as e:
-            print(f"❌ ElevenLabs API Error: {e}")
-            # If you print response.text here, it usually contains the specific API error message
-            if hasattr(e, 'response') and e.response is not None:
-                print(f"Details: {e.response.text}")
+            if audio_content_b64:
+                audio_bytes = base64.b64decode(audio_content_b64)
+                with open(output_filename, 'wb') as f:
+                    f.write(audio_bytes)
+                print(f"✅ Audio saved to {output_filename}")
+                return True
+            else:
+                return False
+                
+        except Exception as e:
+            print(f"❌ GCP API Error: {e}")
             return False
 
     def _get_media_duration(self, file_path):
@@ -1785,6 +1887,7 @@ class SceneSelector:
             label = "neutral"
         
         return label
+
     def _generate_video_from_scene(self, scene_data):
         room_name = scene_data["room"]
         room_visual = scene_data["visual"]
@@ -1802,7 +1905,8 @@ class SceneSelector:
             text = line["line"]
             
             emotion = self._detect_emotion_nrc(text)
-            script.append((speaker, text, emotion))
+            voice_id = self.db.get_npc_voice(speaker)
+            script.append((speaker, text, emotion, voice_id))
             
             if speaker not in speakers:
                 agents.append({
@@ -1831,6 +1935,12 @@ if __name__ == "__main__":
         director = AutomatedDirector()
         GAME_FILE = "Control4.z8"  
         db_manager = GameDBManager()
+        try:
+            print("Fetching Character voice...")
+            fetch_gcp_casting_menu()
+        except Exception as e:
+            print("Exception in fetching voice:")
+            print(e)
         db_name = db_manager.get_or_create_db(GAME_FILE)
         controller = JerichoController(game_file_path=GAME_FILE,db_name=db_name)
         video_logger = SQLLogger(db_name)
