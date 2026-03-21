@@ -64,6 +64,21 @@
         
         <div id="recapContainer" style="margin-top: 20px;"></div>
     </div>
+    <div class="panel">
+        <h2>4. The Cutting Room Floor (Episode Compiler)</h2>
+        <p style="color: #aaa; font-size: 0.9em; margin-top: 0;">Review your pinned timeline events before spending Veo tokens on the final master render.</p>
+        
+        <div class="flex" style="margin-bottom: 15px;">
+            <button onclick="loadTimeline()" style="background: #17a2b8;">🔄 Refresh Storyboard</button>
+            <button id="btnCompile" onclick="compileEpisode(this)" disabled style="background: #dc3545; font-size: 1.1em;">
+                🎬 RENDER FULL EPISODE (Veo)
+            </button>
+        </div>
+        
+        <div id="timelineContainer" style="display: flex; overflow-x: auto; gap: 15px; padding-bottom: 15px;"></div>
+        
+        <div id="episodePlayerContainer" style="margin-top: 20px;"></div>
+    </div>
     <script>
         const API_BASE = "http://localhost:5000";
         let sessionId = "";
@@ -327,6 +342,89 @@
             } catch (error) {
                 console.error("Recap Error:", error);
                 btnElement.innerText = "❌ Recap Failed";
+                btnElement.style.background = "#dc3545";
+            }
+        }
+        async function loadTimeline() {
+            const container = document.getElementById("timelineContainer");
+            container.innerHTML = "Loading timeline...";
+            
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/timeline`);
+                const data = await res.json();
+                
+                if (!data.timeline || data.timeline.length === 0) {
+                    container.innerHTML = "<p style='color:#ffc107;'>Timeline is empty. Pin some scenes from Pre-Viz first!</p>";
+                    document.getElementById("btnCompile").disabled = true;
+                    return;
+                }
+                
+                document.getElementById("btnCompile").disabled = false;
+                let html = "";
+                
+                data.timeline.forEach((scene, index) => {
+                    let snippet = scene.script.length > 0 ? scene.script[0].line.substring(0, 40) + "..." : "Silent action";
+                    html += `
+                        <div style="min-width: 250px; background: #333; padding: 10px; border-radius: 6px; border-left: 4px solid #dc3545;">
+                            <h4 style="margin: 0 0 5px 0;">Scene ${index + 1}</h4>
+                            <div style="font-size: 0.85em; color: #ccc;">
+                                <b>Tick:</b> ${scene.tick}<br>
+                                <b>Room:</b> ${scene.room}<br>
+                                <b>Preview:</b> <i>"${snippet}"</i>
+                            </div>
+                        </div>
+                    `;
+                });
+                
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = "❌ Failed to load timeline.";
+            }
+        }
+
+        async function compileEpisode(btnElement) {
+            btnElement.disabled = true;
+            btnElement.innerText = "🎬 Rendering Missing Clips & Stitching...";
+            btnElement.style.background = "#555";
+            
+            document.getElementById("episodePlayerContainer").innerHTML = "";
+
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/episode/render`, { method: 'POST' });
+                const data = await res.json();
+                
+                if (data.error) {
+                    alert(data.error);
+                    btnElement.innerText = "🎬 RENDER FULL EPISODE (Veo)";
+                    btnElement.disabled = false;
+                    btnElement.style.background = "#dc3545";
+                    return;
+                }
+
+                const expectedFilename = data.video_filename;
+                
+                const pollInterval = setInterval(async () => {
+                    const statusRes = await fetch(`${API_BASE}/render_status/${expectedFilename}`);
+                    const statusData = await statusRes.json();
+                    
+                    if (statusData.status === "done") {
+                        clearInterval(pollInterval);
+                        
+                        btnElement.innerText = "✅ Episode Rendered!";
+                        btnElement.style.background = "#28a745";
+
+                        document.getElementById("episodePlayerContainer").innerHTML = `
+                            <div style="background: #000; padding: 15px; border-radius: 8px; border: 2px solid #dc3545;">
+                                <h3 style="margin: 0 0 10px 0; color: #fff;">🍿 Your Final Episode</h3>
+                                <video width="100%" controls autoplay style="border-radius: 4px;">
+                                    <source src="${API_BASE}${statusData.video_url}" type="video/mp4">
+                                </video>
+                            </div>
+                        `;
+                    }
+                }, 10000); // Poll every 10 seconds since episodes take longer
+            } catch (error) {
+                btnElement.innerText = "❌ Episode Render Failed";
                 btnElement.style.background = "#dc3545";
             }
         }

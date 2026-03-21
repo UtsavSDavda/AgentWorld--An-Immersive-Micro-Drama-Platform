@@ -1784,58 +1784,50 @@ class SceneSelector:
         # We pass your specific game terms here
         self.scorer = DramaScorer(key_terms=key_terms) 
 
-    def scan_and_rank(self, start_tick, end_tick, top_n=5):
+    def scan_and_rank(self, start_tick, end_tick):
         """
-        Scans a range of ticks, scores every conversation, 
-        and returns the top N 'Must Watch' moments.
+        Scans a range of ticks and returns the single most dramatic moment 
+        for EACH tick, creating a sequence of 'Dailies'.
         """
-        print(f"🕵️  Scanning ticks {start_tick} to {end_tick} for drama...")
+        print(f"🕵️  Scanning ticks {start_tick} to {end_tick} for daily dailies...")
         
-        ranked_scenes = [] # Will store tuples: (-score, tick, room, data)
+        dailies = []
 
         for tick in range(start_tick, end_tick + 1):
             rooms = self.db.get_rooms_for_tick(tick)
             if not rooms:
                 continue
 
+            best_score = -1
+            best_scene_data = None
+            best_room = None
+
             for room in rooms:
                 scene_data = self.db.get_structured_scene_data(tick, room)
                 script_data = scene_data.get("script", [])
 
                 if not script_data or len(script_data) < 2:
-                    continue  # Skip empty or single-line events
+                    continue  
 
-                # ADAPTER STEP: Convert DB format to Scorer format
-                # Your DB uses "line", Scorer uses "text"
                 scorer_input = [
                     {"speaker": row["speaker"], "text": row["line"]} 
                     for row in script_data
                 ]
 
-                # CALCULATE SCORE
                 score = self.scorer.calculate_score(scorer_input)
 
-                # Store if it has any meaningful content (> 10)
-                if score > 10:
-                    # Python's heap sort is min-heap, so we store negative score to get max
-                    heapq.heappush(ranked_scenes, (-score, tick, room, scene_data))
+                # Find the most dramatic room for this specific tick
+                if score > best_score:
+                    best_score = score
+                    best_scene_data = scene_data
+                    best_room = room
 
-        # Output the results
-        print(f"\n🎬 TOP {top_n} DRAMATIC MOMENTS FOUND:")
-        
-        # Extract top N from heap
-        top_candidates = []
-        while ranked_scenes and len(top_candidates) < top_n:
-            neg_score, tick, room, data = heapq.heappop(ranked_scenes)
-            real_score = -neg_score
-            top_candidates.append((real_score, tick, room, data))
-            
-            # Print a preview for the user
-            snippet = data['script'][0]['line'][:50] + "..."
-            print(f"[{len(top_candidates)}] Score: {real_score:.1f} | Tick: {tick} | Room: {room}")
-            print(f"    Preview: \"{snippet}\"")
+            # Only add to dailies if something moderately interesting happened
+            if best_score > 10:
+                dailies.append((best_score, tick, best_room, best_scene_data))
 
-        return top_candidates
+        print(f"\n🎬 FOUND {len(dailies)} DAILIES FOR REVIEW")
+        return dailies
 
     def run_auto(self, start_tick, end_tick, selection="all"):
         """

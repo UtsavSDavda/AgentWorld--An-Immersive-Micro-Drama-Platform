@@ -89,7 +89,7 @@ def get_candidates(session_id):
     game_terms = ["darkness", "grue", "lamp", "spell"]
     videomaker = SceneSelector(db=video_logger, director=director, key_terms=game_terms, game_name=controller.game_name)
     
-    top_scenes = videomaker.scan_and_rank(start_tick=0, end_tick=controller.tick_count, top_n=3)
+    top_scenes = videomaker.scan_and_rank(start_tick=0, end_tick=controller.tick_count)
     
     candidates = []
     directions = ["north", "east", "south", "west"]
@@ -237,6 +237,107 @@ def create_recap(session_id):
         "message": f"Generating recap of last {past_n} events...",
         "video_filename": filename
     })
+
+@app.route('/game/<session_id>/timeline', methods=['GET'])
+def get_timeline(session_id):
+    """Returns the current official timeline for the Storyboard UI."""
+    controller = active_sessions.get(session_id)
+    if not controller: return jsonify({"error": "Invalid session"}), 404
+
+    db_name = controller.logger.conn.cursor().connection.execute("PRAGMA database_list").fetchall()[0][2]
+    video_logger = SQLLogger(db_name)
     
+    # Fetch up to the last 100 pinned scenes (chronological)
+    timeline_data = video_logger.get_official_timeline(100) 
+    video_logger.close()
+    
+    return jsonify({"timeline": timeline_data})
+
+@app.route('/game/<session_id>/episode/render', methods=['POST'])
+def render_full_episode(session_id):
+    """Iterates through the timeline, renders missing Veo clips, and stitches them."""
+    controller = active_sessions.get(session_id)
+    if not controller: return jsonify({"error": "Invalid session"}), 404
+
+    db_name = controller.logger.conn.cursor().connection.execute("PRAGMA database_list").fetchall()[0][2]
+    video_logger = SQLLogger(db_name)
+    timeline_data = video_logger.get_official_timeline(100)
+    
+    if not timeline_data:
+        return jsonify({"error": "Timeline is empty. Pin some scenes first!"}), 400
+
+    episode_filename = f"Episode_Full_{controller.game_name}_{uuid.uuid4().hex[:6]}.mp4"
+    output_path = os.path.join(OUTPUT_DIR, episode_filename)
+
+    def run_episode_job():
+        clip_paths = []
+        directions = ["north", "east", "south", "west"]
+        
+        print("\n🎬 --- EPISODE COMPILER STARTED ---")
+        
+        for scene in timeline_data:
+            tick = scene["tick"]
+            room_name = scene["room"]
+            safe_room = room_name.replace(" ", "_").replace("'", "")
+            
+            # The expected filename for the FULL Veo render of this specific scene
+            expected_clip = os.path.join(OUTPUT_DIR, f"final_render_{controller.game_name}_{safe_room}_tick{tick}.mp4")
+            
+            if os.path.exists(expected_clip):
+                print(f"♻️ Found existing Veo render for Tick {tick}. Skipping generation.")
+                clip_paths.append(expected_clip)
+            else:
+                print(f"🎥 Rendering missing Veo clip for Tick {tick}...")
+                
+                # Format the script and agents just like the standard render route
+                agents, formatted_script, speakers = [], [], set()
+                videomaker = SceneSelector(db=video_logger, director=director, key_terms=[], game_name=controller.game_name)
+                
+                for line in scene["script"]:
+                    speaker = line["speaker"]
+                    emotion = videomaker._detect_emotion_nrc(line["line"])
+                    voice_id = video_logger.get_npc_voice(speaker)
+                    formatted_script.append((speaker, line["line"], emotion, voice_id))
+                    
+                    if speaker not in speakers:
+                        assigned_wall = directions[len(speakers) % 4]
+                        agents.append({"name": speaker, "desc": "A character", "facing": assigned_wall})
+                        speakers.add(speaker)
+                
+                # Generate assets and film the scene!
+                scene_assets = director.prepare_scene_assets(scene["visual"], agents, controller.game_name, room_name)
+                director.film_scene(formatted_script, scene_assets, controller.game_name, room_name, expected_clip)
+                
+                if os.path.exists(expected_clip):
+                    clip_paths.append(expected_clip)
+
+        # The Master Stitch
+        if clip_paths:
+            print(f"🎞️ Stitching {len(clip_paths)} scenes into final episode...")
+            list_file = f"ffmpeg_episode_list_{controller.game_name}.txt"
+            with open(list_file, "w") as f:
+                for clip in clip_paths:
+                    # ffmpeg requires absolute paths or safe relative paths
+                    f.write(f"file '{os.path.abspath(clip)}'\n")
+            
+            import subprocess
+            subprocess.run([
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", list_file, "-c", "copy", output_path
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            os.remove(list_file)
+            print(f"🍿 EPISODE COMPLETE: {output_path}")
+            
+        video_logger.close()
+
+    import threading
+    threading.Thread(target=run_episode_job).start()
+    
+    return jsonify({
+        "message": "Episode compilation started. This will take a while!", 
+        "video_filename": episode_filename 
+    })
+
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
