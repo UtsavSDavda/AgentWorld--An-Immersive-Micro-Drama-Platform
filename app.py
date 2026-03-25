@@ -22,6 +22,12 @@ GAMES_DIR = "games"
 if not os.path.exists(GAMES_DIR): os.makedirs(GAMES_DIR)
 db_manager.sync_games_directory(GAMES_DIR)
 
+@app.route('/')
+def serve_dashboard():
+    """Serves the main dashboard UI."""
+    # This tells Flask to look in the current directory ('.') for index.html
+    return send_from_directory('.', 'index.html')
+    
 @app.route('/Assets/<path:filename>')
 def serve_assets(filename):
     return send_from_directory('Assets', filename)
@@ -255,7 +261,10 @@ def get_timeline(session_id):
 
 @app.route('/game/<session_id>/episode/render', methods=['POST'])
 def render_full_episode(session_id):
-    """Iterates through the timeline, renders missing Veo clips, and stitches them."""
+    """Iterates through the timeline, renders missing clips (Animatic or Veo), and stitches them."""
+    data = request.json or {}
+    mode = data.get("mode", "full") # Default to full Veo if not specified
+    
     controller = active_sessions.get(session_id)
     if not controller: return jsonify({"error": "Invalid session"}), 404
 
@@ -266,30 +275,33 @@ def render_full_episode(session_id):
     if not timeline_data:
         return jsonify({"error": "Timeline is empty. Pin some scenes first!"}), 400
 
-    episode_filename = f"Episode_Full_{controller.game_name}_{uuid.uuid4().hex[:6]}.mp4"
+    # Differentiate the final output filename based on the mode
+    prefix = "Animatic_Episode" if mode == "stills" else "Episode_Full"
+    episode_filename = f"{prefix}_{controller.game_name}_{uuid.uuid4().hex[:6]}.mp4"
     output_path = os.path.join(OUTPUT_DIR, episode_filename)
 
     def run_episode_job():
         clip_paths = []
         directions = ["north", "east", "south", "west"]
         
-        print("\n🎬 --- EPISODE COMPILER STARTED ---")
+        mode_label = "ANIMATIC" if mode == "stills" else "VEO"
+        print(f"\n🎬 --- EPISODE COMPILER STARTED ({mode_label} MODE) ---")
         
         for scene in timeline_data:
             tick = scene["tick"]
             room_name = scene["room"]
             safe_room = room_name.replace(" ", "_").replace("'", "")
             
-            # The expected filename for the FULL Veo render of this specific scene
-            expected_clip = os.path.join(OUTPUT_DIR, f"final_render_{controller.game_name}_{safe_room}_tick{tick}.mp4")
+            # Look for the correct clip type based on the requested mode
+            clip_prefix = "animatic" if mode == "stills" else "final_render"
+            expected_clip = os.path.join(OUTPUT_DIR, f"{clip_prefix}_{controller.game_name}_{safe_room}_tick{tick}.mp4")
             
             if os.path.exists(expected_clip):
-                print(f"♻️ Found existing Veo render for Tick {tick}. Skipping generation.")
+                print(f"♻️ Found existing {mode_label} render for Tick {tick}. Skipping generation.")
                 clip_paths.append(expected_clip)
             else:
-                print(f"🎥 Rendering missing Veo clip for Tick {tick}...")
+                print(f"🎥 Rendering missing {mode_label} clip for Tick {tick}...")
                 
-                # Format the script and agents just like the standard render route
                 agents, formatted_script, speakers = [], [], set()
                 videomaker = SceneSelector(db=video_logger, director=director, key_terms=[], game_name=controller.game_name)
                 
@@ -304,20 +316,22 @@ def render_full_episode(session_id):
                         agents.append({"name": speaker, "desc": "A character", "facing": assigned_wall})
                         speakers.add(speaker)
                 
-                # Generate assets and film the scene!
                 scene_assets = director.prepare_scene_assets(scene["visual"], agents, controller.game_name, room_name)
-                director.film_scene(formatted_script, scene_assets, controller.game_name, room_name, expected_clip)
+                
+                # Route to the correct filming method
+                if mode == "stills":
+                    director.film_scene_stills(formatted_script, scene_assets, controller.game_name, room_name, expected_clip)
+                else:
+                    director.film_scene(formatted_script, scene_assets, controller.game_name, room_name, expected_clip)
                 
                 if os.path.exists(expected_clip):
                     clip_paths.append(expected_clip)
 
-        # The Master Stitch
         if clip_paths:
             print(f"🎞️ Stitching {len(clip_paths)} scenes into final episode...")
             list_file = f"ffmpeg_episode_list_{controller.game_name}.txt"
             with open(list_file, "w") as f:
                 for clip in clip_paths:
-                    # ffmpeg requires absolute paths or safe relative paths
                     f.write(f"file '{os.path.abspath(clip)}'\n")
             
             import subprocess
@@ -335,7 +349,7 @@ def render_full_episode(session_id):
     threading.Thread(target=run_episode_job).start()
     
     return jsonify({
-        "message": "Episode compilation started. This will take a while!", 
+        "message": f"{prefix.replace('_', ' ')} compilation started!", 
         "video_filename": episode_filename 
     })
 
