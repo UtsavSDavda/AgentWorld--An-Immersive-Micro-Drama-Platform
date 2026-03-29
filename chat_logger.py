@@ -26,6 +26,7 @@ import urllib.request
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+import pickle
 
 load_dotenv()
 
@@ -227,34 +228,17 @@ class GameDBManager:
                 writer = csv.writer(f)
                 writer.writerow(["game_file", "db_name"])
 
-    def get_or_create_db(self, game_file):
+    def get_or_create_user_db(self, game_file, session_id):
+        """Creates a strictly isolated database for this specific user and game."""
         game_file = os.path.basename(game_file)
-
-        # 1. Check registry
-        with open(self.REGISTRY_FILE, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if not row:
-                    continue
-                if row["game_file"] == game_file:
-                    return row["db_name"]
-
-        # 2. If not found → create new DB entry prepended with the folder path
-        raw_db_name = f"db_{os.path.splitext(game_file)[0]}.db"
+        raw_db_name = f"db_{os.path.splitext(game_file)[0]}_{session_id}.db"
         db_name = os.path.join(self.DB_FOLDER, raw_db_name)
 
-        with open(self.REGISTRY_FILE, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([game_file, db_name])
-
-        print(f"🆕 Created new DB mapping: {game_file} → {db_name}")
-        
-        # --- THE FIX: Actually create the physical DB file and base schema ---
         import sqlite3
         try:
             conn = sqlite3.connect(db_name)
             cursor = conn.cursor()
-            # Initialize the base table so the file is written to disk properly
+            # Initialize base schema and session metadata
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS room_desc (
                 room_name TEXT,
@@ -263,26 +247,26 @@ class GameDBManager:
                 PRIMARY KEY (room_name, tick)
             );
             """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS session_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+            """)
             conn.commit()
             conn.close()
-            print(f"🗄️ Initialized physical SQLite database at: {db_name}")
+            print(f"🗄️ Bound database to session: {db_name}")
         except sqlite3.Error as e:
             print(f"❌ Failed to initialize database file {db_name}: {e}")
 
         return db_name
+
     def sync_games_directory(self, games_dir):
-        """Scans the games folder on boot and ensures all games are registered."""
-        print(f"🔄 Syncing registry with {games_dir}...")
+        # We no longer pre-generate DBs here since they are user-dependent.
+        # Just ensure the directory exists.
         if not os.path.exists(games_dir):
-            return
-            
-        for filename in os.listdir(games_dir):
-            file_path = os.path.join(games_dir, filename)
-            # Only register actual files (ignoring subdirectories or hidden OS files)
-            if os.path.isfile(file_path) and not filename.startswith('.'):
-                # get_or_create_db already checks if it exists, so this is safe to call
-                self.get_or_create_db(filename)
-        print("✅ Registry sync complete.")
+            os.makedirs(games_dir)
+        print("✅ Games directory synced.")
 
 class DramaScorer:
     def __init__(self, key_terms=None):
@@ -838,6 +822,29 @@ class SQLLogger:
             history_data.append(scene_data)
         return history_data
         
+    def ensure_meta_table(self):
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+        """)
+        self.conn.commit()
+
+    def save_current_tick(self, tick_count):
+        self.ensure_meta_table()
+        self.cursor.execute(
+            "INSERT OR REPLACE INTO session_meta (key, value) VALUES ('current_tick', ?)", 
+            (str(tick_count),)
+        )
+        self.conn.commit()
+
+    def get_saved_tick(self):
+        self.ensure_meta_table()
+        self.cursor.execute("SELECT value FROM session_meta WHERE key='current_tick'")
+        result = self.cursor.fetchone()
+        return int(result[0]) if result else 0
+
     def close(self):
         self.conn.close()
 
@@ -873,12 +880,53 @@ def generate_gemini_response(sender, receiver, context, room, db_logger):
 # --- CONTROLLER ---
 
 class JerichoController:
-    def __init__(self, game_file_path, db_name="jericho_game.db"):
+    SAVE_DIR = "Saves"
+    def __init__(self, game_file_path,session_id, db_name="jericho_game.db"):
+        if not os.path.exists(self.SAVE_DIR):
+            os.makedirs(self.SAVE_DIR)
         self.env = jericho.FrotzEnv(game_file_path)
         self.logger = SQLLogger(db_name)
-        self.tick_count = 0
-        self.npc_names = ["Bob", "Alice", "Guard"] # Defined for parsing logic
-        self.env.reset()
+        self.session_id = session_id
+        self.npc_names = ["Bob", "Alice", "Guard"]
+        self.save_file_path = os.path.join(self.SAVE_DIR, f"{session_id}.sav")
+        
+        # State Restoration Logic
+        if os.path.exists(self.save_file_path):
+            self.load_game()
+        else:
+            self.tick_count = 0
+            self.env.reset()
+            print(f"🆕 Started fresh simulation for session {session_id}")
+
+    def save_game(self):
+        """Flushes the Z-Machine state tuple to disk using pickle."""
+        # 1. Extract the state tuple from Jericho
+        state_tuple = self.env.get_state()
+        
+        # 2. Serialize and save the tuple using pickle
+        with open(self.save_file_path, 'wb') as f:
+            pickle.dump(state_tuple, f)
+            
+        self.logger.save_current_tick(self.tick_count)
+        print(f"💾 State saved for {self.session_id} at Tick {self.tick_count}")
+
+    def load_game(self):
+        """Restores the Z-Machine state and syncs the tick count from the DB."""
+        try:
+            # 1. Load the serialized tuple back into memory
+            with open(self.save_file_path, 'rb') as f:
+                state_tuple = pickle.load(f)
+                
+            # 2. Inject the state tuple back into the Jericho environment
+            self.env.set_state(state_tuple)
+            self.tick_count = self.logger.get_saved_tick()
+            print(f"📂 State restored! Resuming {self.session_id} from Tick {self.tick_count}")
+            
+        except (EOFError, pickle.UnpicklingError) as e:
+            # If the file is 0 bytes (from a crash) or corrupted, catch it!
+            print(f"⚠️ Warning: Save file for {self.session_id} is corrupted or empty. Starting fresh.")
+            self.tick_count = 0
+            self.env.reset()
         
     def parse_locations(self, observation_text) -> Dict[str, str]:
         locations = {}
@@ -996,30 +1044,26 @@ class JerichoController:
     def step(self):
         self.tick_count += 1
         
-        # 1. Advance Game
         obs, _, _, _ = self.env.step('step')
-        
-        # 2. Update Room Descriptions (New Requirement)
         self.update_world_state()
-        
-        # 3. Parse Locations & Chat
         locations = self.parse_locations(obs)
         
-        # Group Occupants
         room_occupancy = {}
         for npc, room in locations.items():
             if room not in room_occupancy: room_occupancy[room] = []
             room_occupancy[room].append(npc)
 
-        # Trigger Chat if N >= 2
         for room, occupants in room_occupancy.items():
             if len(occupants) >= 2:
                 self.conduct_group_chat(occupants, room, n_rounds=3)
         
+        # Auto-commit state after every tick
+        self.save_game() 
+        
         return locations
 
     def run(self):
-        print("Starting Simulation with Broadcast & Room Desc...")
+        print("Starting Simulation...")
         try:
             while True:
                 cmd = input(f"\n[Tick {self.tick_count}] Enter to tick, 'q' to quit > ")

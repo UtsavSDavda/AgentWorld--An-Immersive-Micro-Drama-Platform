@@ -2,30 +2,25 @@ import os
 import uuid
 import threading
 from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS # Required for frontend testing
+from flask_cors import CORS
 from chat_logger import JerichoController, GameDBManager, SQLLogger, AutomatedDirector, SceneSelector
 
 OUTPUT_DIR = "Output_Videos"
-if not os.path.exists(OUTPUT_DIR): 
-    os.makedirs(OUTPUT_DIR)
-if not os.path.exists("Assets"): 
-    os.makedirs("Assets")
+if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
+if not os.path.exists("Assets"): os.makedirs("Assets")
 
 app = Flask(__name__)
-CORS(app) # Allow our local HTML file to hit the API
+CORS(app)
 
 active_sessions = {}
 db_manager = GameDBManager()
 director = AutomatedDirector()
 
 GAMES_DIR = "games"
-if not os.path.exists(GAMES_DIR): os.makedirs(GAMES_DIR)
 db_manager.sync_games_directory(GAMES_DIR)
 
 @app.route('/')
 def serve_dashboard():
-    """Serves the main dashboard UI."""
-    # This tells Flask to look in the current directory ('.') for index.html
     return send_from_directory('.', 'index.html')
     
 @app.route('/Assets/<path:filename>')
@@ -41,10 +36,13 @@ def list_games():
 def start_game():
     data = request.json
     game_filename = data.get("game_file")
-    clear_db = data.get("clear_db", False)  # Check if the user wants to wipe the DB
+    username = data.get("username", "Guest").strip()
+    clear_db = data.get("clear_db", False)
     
     if not game_filename:
          return jsonify({"error": "No game_file provided in request"}), 400
+    if not username:
+         username = "Guest"
     
     safe_filename = os.path.basename(game_filename)
     game_path = os.path.join(GAMES_DIR, safe_filename)
@@ -52,27 +50,40 @@ def start_game():
     if not os.path.exists(game_path):
         return jsonify({"error": f"Game file '{safe_filename}' not found."}), 404
 
-    # 1. Get the assigned database path
-    db_name = db_manager.get_or_create_db(safe_filename)
+    # The Identity Layer: Bind user to game
+    safe_user = "".join(x for x in username if x.isalnum() or x in "-_")
+    session_id = f"{safe_user}_{os.path.splitext(safe_filename)[0]}"
     
-    # 2. WIPE THE DATABASE IF REQUESTED
-    if clear_db and os.path.exists(db_name):
-        try:
-            os.remove(db_name)
-            print(f"🗑️ Wiped previous database for {safe_filename}")
-        except Exception as e:
-            print(f"⚠️ Could not delete DB file (it might be in use): {e}")
+    db_name = db_manager.get_or_create_user_db(safe_filename, session_id)
+    
+    # WIPE PROTOCOL
+    if clear_db:
+        if os.path.exists(db_name):
+            try:
+                os.remove(db_name)
+            except Exception as e:
+                print(f"⚠️ Could not delete DB file: {e}")
+                
+        save_path = os.path.join("Saves", f"{session_id}.sav")
+        if os.path.exists(save_path):
+            try:
+                os.remove(save_path)
+                print(f"🗑️ Wiped previous save for {session_id}")
+            except Exception as e:
+                print(f"⚠️ Could not delete save file: {e}")
 
-    session_id = str(uuid.uuid4())
+    # Re-initialize the bound DB if we just wiped it
+    db_name = db_manager.get_or_create_user_db(safe_filename, session_id)
     
-    # 3. Initialize the controller (If we deleted the DB, SQLLogger will instantly recreate a clean one here)
-    controller = JerichoController(game_path, db_name)
+    # Spin up the engine state
+    controller = JerichoController(game_path, session_id, db_name)
     controller.game_name = safe_filename 
     active_sessions[session_id] = controller
     
     return jsonify({
-        "message": "Game started", 
+        "message": f"Welcome back, {username}!" if controller.tick_count > 0 else f"New game started for {username}!", 
         "session_id": session_id,
+        "tick": controller.tick_count,
         "db_name": db_name,
         "game_used": safe_filename
     })

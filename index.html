@@ -22,6 +22,8 @@
         <h2>1. Simulation Engine</h2>
         
         <div class="flex" style="margin-bottom: 15px; align-items: center;">
+            <input type="text" id="playerName" placeholder="Enter Player Name" value="Director" style="padding: 10px; border-radius: 4px; background: #333; color: white; border: 1px solid #555; width: 200px;">
+            
             <select id="gameSelect" style="padding: 10px; border-radius: 4px; background: #333; color: white; border: 1px solid #555;">
                 <option value="">Loading games...</option>
             </select>
@@ -38,8 +40,6 @@
             <button id="btnStep5" onclick="stepGame(5)" disabled>Simulate 5 Turns</button>
         </div>
         <p id="simStatus" style="margin-top: 15px;">Status: Awaiting game start...</p>
-    </div>
-        <p id="simStatus">Status: Awaiting game start...</p>
     </div>
 
     <div class="panel">
@@ -74,7 +74,15 @@
                 🎬 RENDER FULL EPISODE (Veo)
             </button>
         </div>
-        
+        <div class="flex" style="margin-bottom: 15px;">
+            <button onclick="loadTimeline()" style="background: #17a2b8;">🔄 Refresh Storyboard</button>
+            <button id="btnCompileAnimatic" onclick="compileEpisode(this, 'stills')" disabled style="background: #ffc107; color: #000; font-size: 1.1em; font-weight: bold;">
+                🖼️ RENDER ANIMATIC EPISODE
+            </button>
+            <button id="btnCompile" onclick="compileEpisode(this, 'full')" disabled style="background: #dc3545; font-size: 1.1em; font-weight: bold;">
+                🎬 RENDER FULL EPISODE (Veo)
+            </button>
+        </div>
         <div id="timelineContainer" style="display: flex; overflow-x: auto; gap: 15px; padding-bottom: 15px;"></div>
         
         <div id="episodePlayerContainer" style="margin-top: 20px;"></div>
@@ -109,28 +117,34 @@
 
         async function startGame() {
             const gameFile = document.getElementById("gameSelect").value;
-            const clearDb = document.getElementById("chkClearDb").checked; // Get checkbox state
+            const playerName = document.getElementById("playerName").value || "Director";
+            const clearDb = document.getElementById("chkClearDb").checked;
             
             if (!gameFile) return;
 
-            document.getElementById("simStatus").innerText = "Status: Starting...";
+            document.getElementById("simStatus").innerText = "Status: Starting/Loading...";
             document.getElementById("btnStart").disabled = true; 
 
             try {
                 const res = await fetch(`${API_BASE}/game/start`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    // Include the clear_db flag in the payload
-                    body: JSON.stringify({ game_file: gameFile, clear_db: clearDb }) 
+                    body: JSON.stringify({ 
+                        game_file: gameFile, 
+                        username: playerName,
+                        clear_db: clearDb 
+                    }) 
                 });
                 
                 if (!res.ok) throw new Error("Failed to start");
                 
                 const data = await res.json();
                 sessionId = data.session_id;
-                currentTick = 0; // Reset tick counter visually
+                currentTick = data.tick; // Sync the frontend with the loaded backend tick!
                 
-                document.getElementById("simStatus").innerText = `Status: Active (${gameFile}) | Session: ${sessionId.substring(0,8)}... | Tick: ${currentTick}`;
+                // Show the welcome message from the server
+                document.getElementById("simStatus").innerText = `Status: Active | Player: ${playerName} | Tick: ${currentTick} - ${data.message}`;
+                
                 document.getElementById("btnStep").disabled = false;
                 document.getElementById("btnStep5").disabled = false;
                 document.getElementById("btnCandidates").disabled = false;
@@ -356,10 +370,12 @@
                 if (!data.timeline || data.timeline.length === 0) {
                     container.innerHTML = "<p style='color:#ffc107;'>Timeline is empty. Pin some scenes from Pre-Viz first!</p>";
                     document.getElementById("btnCompile").disabled = true;
+                    document.getElementById("btnCompileAnimatic").disabled = true;
                     return;
                 }
                 
                 document.getElementById("btnCompile").disabled = false;
+                document.getElementById("btnCompileAnimatic").disabled = false;
                 let html = "";
                 
                 data.timeline.forEach((scene, index) => {
@@ -382,22 +398,34 @@
             }
         }
 
-        async function compileEpisode(btnElement) {
+        async function compileEpisode(btnElement, mode = 'full') {
+            // Disable both buttons so the user doesn't trigger two conflicting renders
+            const otherBtnId = mode === 'full' ? 'btnCompileAnimatic' : 'btnCompile';
+            document.getElementById(otherBtnId).disabled = true;
+            
+            const originalText = btnElement.innerText;
+            const originalColor = btnElement.style.background;
+            
             btnElement.disabled = true;
-            btnElement.innerText = "🎬 Rendering Missing Clips & Stitching...";
+            btnElement.innerText = mode === 'stills' ? "🖼️ Stitching Animatic Episode..." : "🎬 Rendering Missing Clips & Stitching...";
             btnElement.style.background = "#555";
             
             document.getElementById("episodePlayerContainer").innerHTML = "";
 
             try {
-                const res = await fetch(`${API_BASE}/game/${sessionId}/episode/render`, { method: 'POST' });
+                const res = await fetch(`${API_BASE}/game/${sessionId}/episode/render`, { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: mode }) // Send the mode!
+                });
                 const data = await res.json();
                 
                 if (data.error) {
                     alert(data.error);
-                    btnElement.innerText = "🎬 RENDER FULL EPISODE (Veo)";
+                    btnElement.innerText = originalText;
+                    btnElement.style.background = originalColor;
                     btnElement.disabled = false;
-                    btnElement.style.background = "#dc3545";
+                    document.getElementById(otherBtnId).disabled = false;
                     return;
                 }
 
@@ -410,22 +438,33 @@
                     if (statusData.status === "done") {
                         clearInterval(pollInterval);
                         
+                        // Reset the buttons for the next action
                         btnElement.innerText = "✅ Episode Rendered!";
                         btnElement.style.background = "#28a745";
+                        setTimeout(() => {
+                            btnElement.innerText = originalText;
+                            btnElement.style.background = originalColor;
+                            btnElement.disabled = false;
+                            document.getElementById(otherBtnId).disabled = false;
+                        }, 3000);
+
+                        const titleColor = mode === 'stills' ? "#ffc107" : "#dc3545";
+                        const titleText = mode === 'stills' ? "🍿 Your Animatic Episode" : "🍿 Your Final Veo Episode";
 
                         document.getElementById("episodePlayerContainer").innerHTML = `
-                            <div style="background: #000; padding: 15px; border-radius: 8px; border: 2px solid #dc3545;">
-                                <h3 style="margin: 0 0 10px 0; color: #fff;">🍿 Your Final Episode</h3>
+                            <div style="background: #000; padding: 15px; border-radius: 8px; border: 2px solid ${titleColor};">
+                                <h3 style="margin: 0 0 10px 0; color: #fff;">${titleText}</h3>
                                 <video width="100%" controls autoplay style="border-radius: 4px;">
                                     <source src="${API_BASE}${statusData.video_url}" type="video/mp4">
                                 </video>
                             </div>
                         `;
                     }
-                }, 10000); // Poll every 10 seconds since episodes take longer
+                }, 8000); // Poll slightly faster for animatics
             } catch (error) {
                 btnElement.innerText = "❌ Episode Render Failed";
                 btnElement.style.background = "#dc3545";
+                document.getElementById(otherBtnId).disabled = false;
             }
         }
     </script>
