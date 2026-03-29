@@ -77,7 +77,7 @@ def start_game():
     db_name = db_manager.get_or_create_user_db(safe_filename, session_id)
     
     # Spin up the engine state
-    controller = JerichoController(game_path, session_id, db_name)
+    controller = JerichoController(game_path, session_id)
     controller.game_name = safe_filename 
     active_sessions[session_id] = controller
     
@@ -101,8 +101,7 @@ def get_candidates(session_id):
     controller = active_sessions.get(session_id)
     if not controller: return jsonify({"error": "Invalid session"}), 404
     
-    db_name = controller.logger.conn.cursor().connection.execute("PRAGMA database_list").fetchall()[0][2] 
-    video_logger = SQLLogger(db_name)
+    video_logger = controller.logger
     
     game_terms = ["darkness", "grue", "lamp", "spell"]
     videomaker = SceneSelector(db=video_logger, director=director, key_terms=game_terms, game_name=controller.game_name)
@@ -163,8 +162,7 @@ def render_video(session_id):
     controller = active_sessions.get(session_id)
     if not controller: return jsonify({"error": "Invalid session"}), 404
 
-    db_name = controller.logger.conn.cursor().connection.execute("PRAGMA database_list").fetchall()[0][2]
-    video_logger = SQLLogger(db_name)
+    video_logger = controller.logger
     scene_data = video_logger.get_structured_scene_data(tick, room_name)
     
     agents = []
@@ -219,8 +217,7 @@ def add_to_timeline(session_id):
     controller = active_sessions.get(session_id)
     if not controller: return jsonify({"error": "Invalid session"}), 404
 
-    db_name = controller.logger.conn.cursor().connection.execute("PRAGMA database_list").fetchall()[0][2]
-    video_logger = SQLLogger(db_name)
+    video_logger = controller.logger
     
     success = video_logger.add_to_timeline(tick, room)
     video_logger.close()
@@ -238,8 +235,7 @@ def create_recap(session_id):
     controller = active_sessions.get(session_id)
     if not controller: return jsonify({"error": "Invalid session"}), 404
 
-    db_name = controller.logger.conn.cursor().connection.execute("PRAGMA database_list").fetchall()[0][2]
-    video_logger = SQLLogger(db_name)
+    video_logger = controller.logger
 
     filename = f"Recap_{controller.game_name}_{uuid.uuid4().hex[:6]}.mp4"
     output_path = os.path.join(OUTPUT_DIR, filename)
@@ -262,8 +258,7 @@ def get_timeline(session_id):
     controller = active_sessions.get(session_id)
     if not controller: return jsonify({"error": "Invalid session"}), 404
 
-    db_name = controller.logger.conn.cursor().connection.execute("PRAGMA database_list").fetchall()[0][2]
-    video_logger = SQLLogger(db_name)
+    video_logger = controller.logger
     
     # Fetch up to the last 100 pinned scenes (chronological)
     timeline_data = video_logger.get_official_timeline(100) 
@@ -280,8 +275,7 @@ def render_full_episode(session_id):
     controller = active_sessions.get(session_id)
     if not controller: return jsonify({"error": "Invalid session"}), 404
 
-    db_name = controller.logger.conn.cursor().connection.execute("PRAGMA database_list").fetchall()[0][2]
-    video_logger = SQLLogger(db_name)
+    video_logger = controller.logger
     timeline_data = video_logger.get_official_timeline(100)
     
     if not timeline_data:
@@ -409,8 +403,7 @@ def recast_character(session_id):
     controller = active_sessions.get(session_id)
     if not controller: return jsonify({"error": "Invalid session"}), 404
     
-    db_name = controller.logger.conn.cursor().connection.execute("PRAGMA database_list").fetchall()[0][2]
-    video_logger = SQLLogger(db_name)
+    video_logger = controller.logger
     
     # 1. Force the director to generate and overwrite the image
     new_path = director.create_agent_plate(

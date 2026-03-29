@@ -27,6 +27,7 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import pickle
+from supabase import create_client, Client
 
 load_dotenv()
 
@@ -464,244 +465,103 @@ class SceneArchitect:
         return anchor_text
 
 class SQLLogger:
-    def __init__(self, db_name="jericho_game.db"):
-        self.conn = sqlite3.connect(db_name, check_same_thread=False)
-        self.cursor = self.conn.cursor()
-        self.init_room_desc_table()
+    def __init__(self, session_id):
+        url: str = os.getenv("SUPABASE_URL")
+        key: str = os.getenv("SUPABASE_KEY")
+        if not url or not key:
+            raise ValueError("Supabase credentials missing in .env")
+        
+        self.supabase: Client = create_client(url, key)
+        self.session_id = session_id
 
-    def sanitize_name(self, name):
-        clean_name = re.sub(r'\W+', '_', name)
-        return f"Table_{clean_name}"
+    def save_current_tick(self, tick_count):
+        self.supabase.table('session_meta').upsert({
+            'session_id': self.session_id,
+            'key': 'current_tick',
+            'value': str(tick_count)
+        }).execute()
 
-    def sanitize_room_name(self,name):
-        clean_name = re.sub(r'\W+', '_', name)
-        return f"RoomTable_{clean_name}"
-
-    def init_room_desc_table(self):
-        sql = """
-        CREATE TABLE IF NOT EXISTS room_desc (
-            room_name TEXT,
-            description TEXT,
-            tick INTEGER,
-            PRIMARY KEY (room_name, tick)
-        );
-        """
-        self.cursor.execute(sql)
-        self.cursor.execute("""
-        CREATE TABLE IF NOT EXISTS official_timeline (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tick INTEGER,
-            room_name TEXT,
-            UNIQUE(tick, room_name)
-        );
-        """)
-        self.cursor.execute("""
-        CREATE TABLE IF NOT EXISTS npc_profiles (
-            name TEXT PRIMARY KEY,
-            raw_description TEXT,
-            persona TEXT,
-            appearance TEXT,
-            gender TEXT,
-            voice_id TEXT
-        );
-        """)
-        self.conn.commit()
-
-    def get_npc_profile(self, name):
-        """Fetches the cached NPC profile from disk. Returns (persona, appearance)"""
-        self.cursor.execute("SELECT persona, appearance FROM npc_profiles WHERE name=?", (name,))
-        return self.cursor.fetchone()
+    def get_saved_tick(self):
+        res = self.supabase.table('session_meta').select('value')\
+            .eq('session_id', self.session_id).eq('key', 'current_tick').execute()
+        return int(res.data[0]['value']) if res.data else 0
 
     def save_npc_profile(self, name, raw_desc, persona, appearance, gender="NEUTRAL", voice_id="en-US-Neural2-J"):
-        """Saves the AI-generated profile and permanent voice to the database."""
-        self.cursor.execute(
-            "INSERT OR REPLACE INTO npc_profiles (name, raw_description, persona, appearance, gender, voice_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (name, raw_desc, persona, appearance, gender, voice_id)
-        )
-        self.conn.commit()
-    
+        self.supabase.table('npc_profiles').upsert({
+            'session_id': self.session_id,
+            'name': name,
+            'raw_description': raw_desc,
+            'persona': persona,
+            'appearance': appearance,
+            'gender': gender,
+            'voice_id': voice_id
+        }).execute()
+
+    def get_npc_profile(self, name):
+        res = self.supabase.table('npc_profiles').select('persona, appearance')\
+            .eq('session_id', self.session_id).eq('name', name).execute()
+        return (res.data[0]['persona'], res.data[0]['appearance']) if res.data else None
+
     def get_npc_voice(self, name):
-        """Fetches the cached GCP voice ID for a specific character."""
-        self.cursor.execute("SELECT voice_id FROM npc_profiles WHERE name=?", (name,))
-        result = self.cursor.fetchone()
-        return result[0] if result else "en-US-Neural2-J"
+        res = self.supabase.table('npc_profiles').select('voice_id')\
+            .eq('session_id', self.session_id).eq('name', name).execute()
+        return res.data[0]['voice_id'] if res.data else "en-US-Neural2-J"
+
+    def get_all_npcs(self):
+        res = self.supabase.table('npc_profiles').select('*')\
+            .eq('session_id', self.session_id).execute()
+        return res.data
+
+    def update_npc_appearance(self, name, new_appearance_prompt):
+        self.supabase.table('npc_profiles').update({
+            'appearance': new_appearance_prompt
+        }).eq('session_id', self.session_id).eq('name', name).execute()
 
     def update_room_desc(self, room_name, description, tick):
-        # We now store a snapshot for every tick
-        sql = "INSERT OR REPLACE INTO room_desc (room_name, description, tick) VALUES (?, ?, ?)"
-        self.cursor.execute(sql, (room_name, description, tick))
-        self.conn.commit()
-
-    def ensure_table(self, table_name, is_room_log=False):
-        if is_room_log:
-            sql = f"""CREATE TABLE IF NOT EXISTS {table_name} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tick INTEGER,
-                sender TEXT,
-                receiver TEXT,
-                message TEXT
-            );"""
-        else:
-            sql = f"""CREATE TABLE IF NOT EXISTS {table_name} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tick INTEGER,
-                room TEXT,
-                sender TEXT,
-                receiver TEXT,
-                message TEXT
-            );"""
-        self.cursor.execute(sql)
-        self.conn.commit()
+        self.supabase.table('room_desc').upsert({
+            'session_id': self.session_id,
+            'room_name': room_name,
+            'description': description,
+            'tick': tick
+        }).execute()
 
     def log_broadcast(self, tick, room, sender, receivers, message):
-        """
-        Logs a message from one Sender to N Receivers.
-        """
-        try:
-            # 1. LOG TO ROOM (The 'Public' Record)
-            # Receiver is marked as "All" or the list of names for clarity
-            room_table = self.sanitize_room_name(room)
-            self.ensure_table(room_table, is_room_log=True)
-            recipients_str = ", ".join(receivers)
-            self.cursor.execute(
-                f"INSERT INTO {room_table} (tick, sender, receiver, message) VALUES (?, ?, ?, ?)",
-                (tick, sender, recipients_str, message)
-            )
-
-            # 2. LOG TO SENDER (Personal Memory)
-            sender_table = self.sanitize_name(sender)
-            self.ensure_table(sender_table, is_room_log=False)
-            self.cursor.execute(
-                f"INSERT INTO {sender_table} (tick, room, sender, receiver, message) VALUES (?, ?, ?, ?, ?)",
-                (tick, room, sender, recipients_str, message)
-            )
-
-            # 3. LOG TO EACH RECEIVER (Broadcasting)
-            for recipient in receivers:
-                rec_table = self.sanitize_name(recipient)
-                self.ensure_table(rec_table, is_room_log=False)
-                # Note: Sender is the speaker, Receiver is "Me" (the recipient)
-                self.cursor.execute(
-                    f"INSERT INTO {rec_table} (tick, room, sender, receiver, message) VALUES (?, ?, ?, ?, ?)",
-                    (tick, room, sender, recipient, message)
-                )
-
-            self.conn.commit()
-            
-        except sqlite3.Error as e:
-            print(f"❌ Database Error: {e}")
+        """Unified logging: One row captures the whole event."""
+        recipients_str = ", ".join(receivers)
+        self.supabase.table('chat_logs').insert({
+            'session_id': self.session_id,
+            'tick': tick,
+            'room_name': room,
+            'sender': sender,
+            'receiver': recipients_str,
+            'message': message
+        }).execute()
 
     def get_agent_context(self, agent_name, limit=5):
-        table_name = self.sanitize_name(agent_name)
-        try:
-            self.cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", 
-                (table_name,)
-            )
-            if not self.cursor.fetchone(): return ""
-
-            query = f"SELECT sender, message, tick FROM {table_name} ORDER BY id DESC LIMIT ?"
-            self.cursor.execute(query, (limit,))
-            rows = self.cursor.fetchall()
-            rows.reverse()
+        """Finds messages sent by the agent, or where the agent is in the receiver list."""
+        res = self.supabase.table('chat_logs').select('sender, message, tick')\
+            .eq('session_id', self.session_id)\
+            .or_(f"sender.eq.{agent_name},receiver.ilike.%{agent_name}%")\
+            .order('id', desc=True).limit(limit).execute()
             
-            return "\n".join([f"[Tick {r[2]}] {r[0]}: {r[1]}" for r in rows])
-        except sqlite3.Error:
-            return ""
-
-    def get_video_generation_context(self, tick, room_name):
-        """
-        Fetches the visual description and dialogue for a specific room and tick.
-        Returns a formatted string suitable for a Video AI prompt.
-        """
-        # 1. Fetch Visual Description (The "Set")
-        self.cursor.execute(
-            "SELECT description FROM room_desc WHERE room_name = ? AND tick = ?", 
-            (room_name, tick)
-        )
-        row = self.cursor.fetchone()
-        if row:
-            visual_desc = row[0]
-        else:
-            # Fallback: Get the most recent description before this tick
-            self.cursor.execute(
-                "SELECT description FROM room_desc WHERE room_name = ? AND tick < ? ORDER BY tick DESC LIMIT 1",
-                (room_name, tick)
-            )
-            fallback = self.cursor.fetchone()
-            visual_desc = fallback[0] if fallback else "An empty room."
-
-        # 2. Fetch Dialogue (The "Script")
-        table_name = self.sanitize_room_name(room_name)
-        
-        # Check if table exists first
-        self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
-        if not self.cursor.fetchone():
-            return f"Scene Description: {visual_desc}\n\n(No dialogue recorded.)"
-
-        self.cursor.execute(
-            "SELECT sender, message FROM {} WHERE tick = ?".format(table_name), 
-            (tick,)
-        )
-        chat_rows = self.cursor.fetchall()
-        
-        # 3. Format the Output
-        dialogue_script = ""
-        for sender, msg in chat_rows:
-            dialogue_script += f"- {sender}: \"{msg}\"\n"
-            
-        if not dialogue_script:
-            dialogue_script = "(The characters are silent, looking around.)"
-
-        final_context = (
-            f"--- SCENE SETTING (Room: {room_name}) ---\n"
-            f"Visual Details: {visual_desc}\n\n"
-            f"--- ACTION & DIALOGUE (Tick {tick}) ---\n"
-            f"{dialogue_script}"
-        )
-        
-        return final_context
+        rows = res.data[::-1] # Reverse chronologically
+        return "\n".join([f"[Tick {r['tick']}] {r['sender']}: {r['message']}" for r in rows])
 
     def get_structured_scene_data(self, tick, room_name):
-        """
-        Returns a dictionary with separated visual context and dialogue lines.
-        Used for programmatic video generation.
-        """
+        # 1. Fetch Room Visuals (Closest tick <= current tick)
+        res_room = self.supabase.table('room_desc').select('description')\
+            .eq('session_id', self.session_id).eq('room_name', room_name)\
+            .lte('tick', tick).order('tick', desc=True).limit(1).execute()
+            
+        visual_desc = res_room.data[0]['description'] if res_room.data else "A dark, empty room."
 
-        # 1. Fetch Room Visuals
-        self.cursor.execute(
-            "SELECT description FROM room_desc WHERE room_name = ? AND tick = ?", 
-            (room_name, tick)
-        )
-        row = self.cursor.fetchone()
+        # 2. Fetch Dialogue for this exact tick
+        res_chat = self.supabase.table('chat_logs').select('sender, message')\
+            .eq('session_id', self.session_id).eq('room_name', room_name)\
+            .eq('tick', tick).order('id').execute()
         
-        # Fallback if specific tick is missing (use most recent)
-        if not row:
-            self.cursor.execute(
-                "SELECT description FROM room_desc WHERE room_name = ? AND tick < ? ORDER BY tick DESC LIMIT 1",
-                (room_name, tick)
-            )
-            row = self.cursor.fetchone()
-        print(row)
-        visual_desc = row[0] if row else "A dark, empty room."
-
-        # 2. Fetch Dialogue
-        table_name = self.sanitize_room_name(room_name)
+        script = [{"speaker": row['sender'], "line": row['message']} for row in res_chat.data]
         
-        # Check if table exists
-        self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
-        if not self.cursor.fetchone():
-            return {"visual": visual_desc, "script": []}
-
-        self.cursor.execute(
-            "SELECT sender, message FROM {} WHERE tick = ? ORDER BY id ASC".format(table_name), 
-            (tick,)
-        )
-        
-        # Format as list of dicts
-        script = [{"speaker": row[0], "line": row[1]} for row in self.cursor.fetchall()]
-        print(script)
-        print(room_name)
         return {
             "visual": visual_desc,
             "script": script,
@@ -710,158 +570,51 @@ class SQLLogger:
         }
 
     def get_rooms_for_tick(self, tick):
-        """
-        Returns room names that contain dialogue at the given tick.
-        Only scans tables with prefix 'RoomTable_'.
-        """
-        self.cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'RoomTable_%'"
-        )
-        
-        room_tables = [row[0] for row in self.cursor.fetchall()]
-        rooms_with_dialogue = []
+        """Finds any room that had activity on this tick."""
+        res = self.supabase.table('chat_logs').select('room_name')\
+            .eq('session_id', self.session_id).eq('tick', tick).execute()
+            
+        # Extract unique room names
+        return list(set([row['room_name'] for row in res.data]))
 
-        for table in room_tables:
-            try:
-                self.cursor.execute(
-                    f"SELECT 1 FROM {table} WHERE tick=? LIMIT 1",
-                    (tick,)
-                )
-                if self.cursor.fetchone():
-                    # Extract clean room name
-                    room_name = table.replace("RoomTable_", "")
-                    rooms_with_dialogue.append(room_name)
-            except sqlite3.Error:
-                continue
-
-        return rooms_with_dialogue
-
-    def delete_table(self, table_name):
-        """
-        Deletes a dynamically created table (room or agent log).
-        Prevents accidental deletion of core tables.
-        """
-
-        # Prevent deleting core system tables
-        protected_tables = ["room_desc"]
-        if table_name in protected_tables:
-            print(f"❌ Cannot delete protected table: {table_name}")
-            return False
-
+    def add_to_timeline(self, tick, room_name):
         try:
-            # Check if table exists
-            self.cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                (table_name,)
-            )
-            if not self.cursor.fetchone():
-                print(f"⚠️ Table '{table_name}' does not exist.")
-                return False
-
-            # Drop table
-            self.cursor.execute(f"DROP TABLE {table_name}")
-            self.conn.commit()
-
-            print(f"🗑️ Deleted table: {table_name}")
+            self.supabase.table('official_timeline').insert({
+                'session_id': self.session_id,
+                'tick': tick,
+                'room_name': room_name
+            }).execute()
             return True
-
-        except sqlite3.Error as e:
-            print(f"❌ Database Error while deleting table: {e}")
+        except Exception as e:
+            print(f"⚠️ Scene already pinned: {e}")
             return False
-    def log_official_render(self, tick, room_name):
-        """Saves a scene to the 'Director's Cut' timeline."""
-        self.cursor.execute(
-            "INSERT INTO official_timeline (tick, room_name) VALUES (?, ?)", 
-            (tick, room_name)
-        )
-        self.conn.commit()
-        
+
     def get_official_timeline(self, past_n_ticks):
-        """Fetches the actual scripts from the scenes you rendered."""
-        self.cursor.execute(
-            "SELECT tick, room_name FROM official_timeline ORDER BY tick DESC LIMIT ?", 
-            (past_n_ticks,)
-        )
-        rendered_scenes = self.cursor.fetchall()
-        
-        # Reverse to chronological order
-        rendered_scenes.reverse() 
-        
+        res = self.supabase.table('official_timeline').select('tick, room_name')\
+            .eq('session_id', self.session_id).order('tick', desc=True).limit(past_n_ticks).execute()
+            
+        rendered_scenes = res.data[::-1] 
         full_history = []
-        for tick, room in rendered_scenes:
-            data = self.get_structured_scene_data(tick, room)
+        for scene in rendered_scenes:
+            data = self.get_structured_scene_data(scene['tick'], scene['room_name'])
             full_history.append(data)
             
         return full_history
     
-    def add_to_timeline(self, tick, room_name):
-        """Allows the user to explicitly lock a scene into the canon timeline."""
-        try:
-            self.cursor.execute(
-                "INSERT INTO official_timeline (tick, room_name) VALUES (?, ?)", 
-                (tick, room_name)
-            )
-            self.conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            print(f"⚠️ Scene {room_name} (Tick {tick}) is already in the timeline.")
-            return False
+    def save_zmachine_state(self, b64_state):
+        self.supabase.table('session_meta').upsert({
+            'session_id': self.session_id,
+            'key': 'zmachine_state',
+            'value': b64_state
+        }).execute()
 
-    def get_timeline_history(self, past_n=3):
-        """Fetches the last N events added to the timeline in chronological order."""
-        self.cursor.execute(
-            "SELECT tick, room_name FROM official_timeline ORDER BY id DESC LIMIT ?", 
-            (past_n,)
-        )
-        rows = self.cursor.fetchall()
-        rows.reverse() # Flip so the oldest of the 'past N' is first
+    def get_zmachine_state(self):
+        res = self.supabase.table('session_meta').select('value')\
+            .eq('session_id', self.session_id).eq('key', 'zmachine_state').execute()
+        return res.data[0]['value'] if res.data else None
         
-        history_data = []
-        for tick, room in rows:
-            scene_data = self.get_structured_scene_data(tick, room)
-            history_data.append(scene_data)
-        return history_data
-        
-    def ensure_meta_table(self):
-        self.cursor.execute("""
-        CREATE TABLE IF NOT EXISTS session_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-        """)
-        self.conn.commit()
-
-    def save_current_tick(self, tick_count):
-        self.ensure_meta_table()
-        self.cursor.execute(
-            "INSERT OR REPLACE INTO session_meta (key, value) VALUES ('current_tick', ?)", 
-            (str(tick_count),)
-        )
-        self.conn.commit()
-
-    def get_saved_tick(self):
-        self.ensure_meta_table()
-        self.cursor.execute("SELECT value FROM session_meta WHERE key='current_tick'")
-        result = self.cursor.fetchone()
-        return int(result[0]) if result else 0
-    
-    def get_all_npcs(self):
-        """Fetches the entire known cast roster for this session safely."""
-        try:
-            self.cursor.execute("SELECT name, raw_description, persona, appearance, gender, voice_id FROM npc_profiles")
-            cols = [column[0] for column in self.cursor.description]
-            return [dict(zip(cols, row)) for row in self.cursor.fetchall()]
-        except Exception as e:
-            print(f"⚠️ Cast fetch error (table might be empty yet): {e}")
-            return []
-
-    def update_npc_appearance(self, name, new_appearance_prompt):
-        """Saves the user's custom director prompt so future scenes use the new design."""
-        self.cursor.execute("UPDATE npc_profiles SET appearance=? WHERE name=?", (new_appearance_prompt, name))
-        self.conn.commit()
-
     def close(self):
-        self.conn.close()
+        pass # Supabase handles connection pooling automatically
 
 def generate_gemini_response(sender, receiver, context, room, db_logger):
     """Calls Gemini Pro to generate a dialogue line with retry logic."""
@@ -896,54 +649,54 @@ def generate_gemini_response(sender, receiver, context, room, db_logger):
 
 class JerichoController:
     SAVE_DIR = "Saves"
-    def __init__(self, game_file_path,session_id, db_name="jericho_game.db"):
-        if not os.path.exists(self.SAVE_DIR):
-            os.makedirs(self.SAVE_DIR)
+    def __init__(self, game_file_path, session_id):
         self.env = jericho.FrotzEnv(game_file_path)
-        self.logger = SQLLogger(db_name)
         self.session_id = session_id
+        self.logger = SQLLogger(session_id)
         self.npc_names = ["Bob", "Alice", "Guard"]
-        self.save_file_path = os.path.join(self.SAVE_DIR, f"{session_id}.sav")
         
-        # State Restoration Logic
-        if os.path.exists(self.save_file_path):
-            self.load_game()
+        # 1. Ask Supabase if a state exists for this session
+        saved_state_b64 = self.logger.get_zmachine_state()
+        
+        # 2. Cloud State Restoration Logic
+        if saved_state_b64:
+            self.load_game(saved_state_b64)
         else:
             self.tick_count = 0
             self.env.reset()
-            print(f"🆕 Started fresh simulation for session {session_id}")
+            print(f"🆕 Started fresh cloud simulation for session {session_id}")
             self.update_world_state()
 
     def save_game(self):
-        """Flushes the Z-Machine state tuple to disk using pickle."""
-        # 1. Extract the state tuple from Jericho
+        """Flushes the Z-Machine state tuple to Supabase."""
+        # Extract and convert the tuple into a text-safe Base64 string
         state_tuple = self.env.get_state()
+        pickled_bytes = pickle.dumps(state_tuple)
+        b64_state = base64.b64encode(pickled_bytes).decode('utf-8')
         
-        # 2. Serialize and save the tuple using pickle
-        with open(self.save_file_path, 'wb') as f:
-            pickle.dump(state_tuple, f)
-            
+        # Push to the cloud
+        self.logger.save_zmachine_state(b64_state)
         self.logger.save_current_tick(self.tick_count)
-        print(f"💾 State saved for {self.session_id} at Tick {self.tick_count}")
+        print(f"💾 Cloud state saved for {self.session_id} at Tick {self.tick_count}")
 
-    def load_game(self):
-        """Restores the Z-Machine state and syncs the tick count from the DB."""
+    def load_game(self, b64_state):
+        """Restores the Z-Machine state from the Supabase Base64 string."""
         try:
-            # 1. Load the serialized tuple back into memory
-            with open(self.save_file_path, 'rb') as f:
-                state_tuple = pickle.load(f)
-                
-            # 2. Inject the state tuple back into the Jericho environment
+            # Decode the text back into binary and unpickle it
+            pickled_bytes = base64.b64decode(b64_state)
+            state_tuple = pickle.loads(pickled_bytes)
+            
+            # Inject into the emulator
             self.env.set_state(state_tuple)
             self.tick_count = self.logger.get_saved_tick()
-            print(f"📂 State restored! Resuming {self.session_id} from Tick {self.tick_count}")
+            print(f"📂 Cloud state restored! Resuming {self.session_id} from Tick {self.tick_count}")
             
-        except (EOFError, pickle.UnpicklingError) as e:
-            # If the file is 0 bytes (from a crash) or corrupted, catch it!
-            print(f"⚠️ Warning: Save file for {self.session_id} is corrupted or empty. Starting fresh.")
+        except (EOFError, pickle.UnpicklingError, base64.binascii.Error) as e:
+            print(f"⚠️ Warning: Cloud save corrupted. Starting fresh. Error: {e}")
             self.tick_count = 0
             self.env.reset()
-        
+            self.update_world_state()
+
     def parse_locations(self, observation_text) -> Dict[str, str]:
         locations = {}
         pattern = re.compile(r"DATA_LOC:\s*(.*?)\s*\|\s*(.*?)(?=DATA_LOC|---|$)")
