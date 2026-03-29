@@ -844,6 +844,21 @@ class SQLLogger:
         self.cursor.execute("SELECT value FROM session_meta WHERE key='current_tick'")
         result = self.cursor.fetchone()
         return int(result[0]) if result else 0
+    
+    def get_all_npcs(self):
+        """Fetches the entire known cast roster for this session safely."""
+        try:
+            self.cursor.execute("SELECT name, raw_description, persona, appearance, gender, voice_id FROM npc_profiles")
+            cols = [column[0] for column in self.cursor.description]
+            return [dict(zip(cols, row)) for row in self.cursor.fetchall()]
+        except Exception as e:
+            print(f"⚠️ Cast fetch error (table might be empty yet): {e}")
+            return []
+
+    def update_npc_appearance(self, name, new_appearance_prompt):
+        """Saves the user's custom director prompt so future scenes use the new design."""
+        self.cursor.execute("UPDATE npc_profiles SET appearance=? WHERE name=?", (new_appearance_prompt, name))
+        self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -897,6 +912,7 @@ class JerichoController:
             self.tick_count = 0
             self.env.reset()
             print(f"🆕 Started fresh simulation for session {session_id}")
+            self.update_world_state()
 
     def save_game(self):
         """Flushes the Z-Machine state tuple to disk using pickle."""
@@ -1206,20 +1222,21 @@ class AutomatedDirector:
             print(f"❌ Failed extracting last frame: {e}")
             return None
 
-    def create_agent_plate(self, agent_name, agent_desc):
-        """Generates a reusable character cutout on a plain background."""
-        # We store agents globally, not tied to a specific game, so they persist everywhere
+    def create_agent_plate(self, agent_name, agent_desc, custom_prompt=None, force_recreate=False):
+        """Generates a reusable character cutout. Now supports forced regeneration."""
         agent_dir = os.path.join("Assets", "Global_Agents")
         os.makedirs(agent_dir, exist_ok=True)
         filepath = os.path.join(agent_dir, f"{agent_name}.png")
 
-        if os.path.exists(filepath):
-            print(f"♻️ Loading existing agent plate for {agent_name}...")
+        # Bypass cache if the user explicitly clicked "Recast"
+        if os.path.exists(filepath) and not force_recreate:
             return filepath
 
-        # Prompt explicitly requests a neutral background for easy removal
+        # If user provides a custom prompt, use it. Otherwise use the AI-generated desc.
+        base_desc = custom_prompt if custom_prompt else agent_desc
+
         prompt = f"""
-        Cinematic mid-shot of {agent_desc}.
+        Cinematic mid-shot of {base_desc}.
         The character is facing the camera.
         ENVIRONMENT: ISOLATED CHARACTER ON A SOLID, FLAT, LIGHT GREY BACKGROUND. 
         Absolutely no scenery, no props, no background objects. Clean studio lighting.
@@ -1230,7 +1247,7 @@ class AutomatedDirector:
             response = client.models.generate_images(
                 model=IMG_MODEL,
                 prompt=prompt,
-                config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio="1:1") # Square is usually better for character isolation
+                config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio="1:1")
             )
             response.generated_images[0].image.save(filepath)
             return filepath

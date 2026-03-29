@@ -41,6 +41,15 @@
         </div>
         <p id="simStatus" style="margin-top: 15px;">Status: Awaiting game start...</p>
     </div>
+    
+    <div class="panel">
+        <h2>🎭 1.5 Casting & Wardrobe (The Green Room)</h2>
+        <p style="color: #aaa; font-size: 0.9em; margin-top: 0;">Review character assets before rendering. If an AI design feels off, rewrite their prompt and recast them.</p>
+        <button id="btnLoadCast" onclick="loadCast()" disabled style="background: #17a2b8; margin-bottom: 15px;">🔍 Refresh Cast Roster</button>
+        <div id="castContainer" class="flex" style="gap: 20px;">
+            <p style="color: #666; font-style: italic;">No characters discovered yet. Explore the game to find NPCs!</p>
+        </div>
+    </div>
 
     <div class="panel">
         <h2>2. Pre-Production (MediaPipe Engine)</h2>
@@ -119,11 +128,12 @@
             const gameFile = document.getElementById("gameSelect").value;
             const playerName = document.getElementById("playerName").value || "Director";
             const clearDb = document.getElementById("chkClearDb").checked;
+            const startBtn = document.getElementById("btnStart");
             
             if (!gameFile) return;
 
             document.getElementById("simStatus").innerText = "Status: Starting/Loading...";
-            document.getElementById("btnStart").disabled = true; 
+            startBtn.disabled = true; 
 
             try {
                 const res = await fetch(`${API_BASE}/game/start`, {
@@ -140,19 +150,28 @@
                 
                 const data = await res.json();
                 sessionId = data.session_id;
-                currentTick = data.tick; // Sync the frontend with the loaded backend tick!
+                currentTick = data.tick; 
                 
-                // Show the welcome message from the server
                 document.getElementById("simStatus").innerText = `Status: Active | Player: ${playerName} | Tick: ${currentTick} - ${data.message}`;
                 
+                // UNLOCK ALL BUTTONS
                 document.getElementById("btnStep").disabled = false;
                 document.getElementById("btnStep5").disabled = false;
                 document.getElementById("btnCandidates").disabled = false;
                 document.getElementById("btnRecap").disabled = false;
                 
+                // CRITICAL: Unlock the cast button and auto-load it
+                const castBtn = document.getElementById("btnLoadCast");
+                if (castBtn) {
+                    castBtn.disabled = false;
+                    loadCast(); 
+                }
+                
             } catch (e) { 
+                console.error(e);
                 alert("Failed to connect to server."); 
-                document.getElementById("btnStart").disabled = false;
+            } finally {
+                startBtn.disabled = false;
             }
         }
 
@@ -164,6 +183,58 @@
                 currentTick = data.tick;
             }
             document.getElementById("simStatus").innerText = `Status: Active | Tick: ${currentTick}`;
+            
+            // Auto-refresh the cast in case someone new walked into the room!
+            if (document.getElementById("btnLoadCast")) {
+                loadCast();
+            }
+        }
+
+        async function loadCast() {
+            const container = document.getElementById("castContainer");
+            const btn = document.getElementById("btnLoadCast");
+            
+            if (!btn) return; // Failsafe if the HTML element is missing
+
+            btn.innerText = "⏳ Loading Cast (Generating missing portraits)...";
+            btn.disabled = true;
+
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/cast`);
+                const data = await res.json();
+                
+                // Catch backend errors (like 404 Invalid Session)
+                if (data.error) throw new Error(data.error);
+
+                // Check if the cast is genuinely empty
+                if (!data.cast || data.cast.length === 0) {
+                    container.innerHTML = `<p style="color: #bbb; font-style: italic;">No characters discovered yet. Explore the game to find NPCs!</p>`;
+                } else {
+                    let html = "";
+                    data.cast.forEach(npc => {
+                        const imgTag = npc.image_url 
+                            ? `<img id="img_${npc.name}" src="${API_BASE}${npc.image_url}" alt="${npc.name}" style="width:100%; height:auto; border-radius:4px; margin-bottom:10px; border: 2px solid #555;">` 
+                            : `<div style="height:150px; background:#444; display:flex; align-items:center; justify-content:center; margin-bottom:10px;">No Image</div>`;
+                            
+                        html += `
+                        <div style="background: #222; padding: 15px; border-radius: 8px; width: 220px; border: 1px solid #444;">
+                            <h3 style="margin: 0 0 10px 0; color: #ffc107;">${npc.name}</h3>
+                            ${imgTag}
+                            <textarea id="prompt_${npc.name}" rows="3" style="width: 100%; box-sizing: border-box; background: #000; color: #fff; border: 1px solid #555; padding: 5px; margin-bottom: 10px; font-size: 0.85em;">${npc.appearance}</textarea>
+                            <button id="btn_recast_${npc.name}" onclick="recastAgent('${npc.name}')" style="width: 100%; background: #6f42c1; color: white; border: none; padding: 8px; cursor: pointer; border-radius: 4px;">✨ Recast Character</button>
+                        </div>
+                        `;
+                    });
+                    container.innerHTML = html;
+                }
+            } catch (error) {
+                console.error("Error loading cast:", error);
+                container.innerHTML = `<p style='color: #dc3545;'>❌ Failed to load cast list: ${error.message}</p>`;
+            } finally {
+                // GUARANTEE the button unlocks, even if the fetch completely fails
+                btn.innerText = "🔍 Refresh Cast Roster";
+                btn.disabled = false;
+            }
         }
 
         async function loadCandidates() {
@@ -465,6 +536,45 @@
                 btnElement.innerText = "❌ Episode Render Failed";
                 btnElement.style.background = "#dc3545";
                 document.getElementById(otherBtnId).disabled = false;
+            }
+        }
+        
+        async function recastAgent(npcName) {
+            const customPrompt = document.getElementById(`prompt_${npcName}`).value;
+            const btn = document.getElementById(`btn_recast_${npcName}`);
+            
+            btn.innerText = "⏳ Photographing...";
+            btn.disabled = true;
+            btn.style.background = "#555";
+
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/recast`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ npc_name: npcName, custom_prompt: customPrompt })
+                });
+                
+                const data = await res.json();
+                
+                if (data.image_url) {
+                    // Update the image src instantly! The ?t= timestamp forces Chrome to bypass cache.
+                    document.getElementById(`img_${npcName}`).src = `${API_BASE}${data.image_url}`;
+                    btn.innerText = "✅ Recast Successful!";
+                    btn.style.background = "#28a745";
+                } else {
+                    throw new Error(data.error || "Generation failed");
+                }
+            } catch (error) {
+                console.error("Recast error:", error);
+                btn.innerText = "❌ Recast Failed";
+                btn.style.background = "#dc3545";
+            } finally {
+                // Reset button after 3 seconds
+                setTimeout(() => {
+                    btn.innerText = "✨ Recast Character";
+                    btn.style.background = "#6f42c1";
+                    btn.disabled = false;
+                }, 3000);
             }
         }
     </script>

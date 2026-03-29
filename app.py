@@ -4,6 +4,7 @@ import threading
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from chat_logger import JerichoController, GameDBManager, SQLLogger, AutomatedDirector, SceneSelector
+import time
 
 OUTPUT_DIR = "Output_Videos"
 if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
@@ -363,6 +364,75 @@ def render_full_episode(session_id):
         "message": f"{prefix.replace('_', ' ')} compilation started!", 
         "video_filename": episode_filename 
     })
+
+@app.route('/game/<session_id>/cast', methods=['GET'])
+def get_cast(session_id):
+    """Fetches the cast list and generates missing initial plates."""
+    controller = active_sessions.get(session_id)
+    if not controller: return jsonify({"error": "Invalid session"}), 404
+    
+    # THE FIX: Use the existing, thread-safe logger attached to the controller!
+    # No more reverse-engineering the PRAGMA database list.
+    npcs = controller.logger.get_all_npcs()
+    
+    cast_list = []
+    for npc in npcs:
+        # Use safe paths for cross-platform compatibility
+        agent_path = os.path.join("Assets", "Global_Agents", f"{npc['name']}.png")
+        
+        # If we know the NPC but haven't photographed them yet, do it now!
+        if not os.path.exists(agent_path):
+            director.create_agent_plate(npc['name'], npc['appearance'])
+        
+        # Add a timestamp to the URL so the browser never caches an old image
+        cache_buster = int(time.time())
+        image_url = f"/Assets/Global_Agents/{npc['name']}.png?t={cache_buster}" if os.path.exists(agent_path) else None
+        
+        cast_list.append({
+            "name": npc['name'],
+            "appearance": npc['appearance'],
+            "image_url": image_url
+        })
+    
+    return jsonify({"cast": cast_list})
+
+@app.route('/game/<session_id>/recast', methods=['POST'])
+def recast_character(session_id):
+    """Overwrites the character image using a user's custom prompt."""
+    data = request.json
+    npc_name = data.get("npc_name")
+    custom_prompt = data.get("custom_prompt")
+    
+    if not npc_name or not custom_prompt:
+        return jsonify({"error": "Missing name or prompt"}), 400
+        
+    controller = active_sessions.get(session_id)
+    if not controller: return jsonify({"error": "Invalid session"}), 404
+    
+    db_name = controller.logger.conn.cursor().connection.execute("PRAGMA database_list").fetchall()[0][2]
+    video_logger = SQLLogger(db_name)
+    
+    # 1. Force the director to generate and overwrite the image
+    new_path = director.create_agent_plate(
+        agent_name=npc_name, 
+        agent_desc=custom_prompt, 
+        custom_prompt=custom_prompt, 
+        force_recreate=True
+    )
+    
+    if new_path:
+        # 2. Update the database so future master shots use the new prompt
+        video_logger.update_npc_appearance(npc_name, custom_prompt)
+        video_logger.close()
+        
+        safe_url = new_path.replace("\\", "/") # Windows path safety
+        return jsonify({
+            "message": f"Successfully recast {npc_name}", 
+            "image_url": f"/{safe_url}?t={int(time.time())}"
+        })
+    else:
+        video_logger.close()
+        return jsonify({"error": "Failed to generate new image"}), 500
 
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
