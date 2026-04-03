@@ -55,28 +55,31 @@ def start_game():
     safe_user = "".join(x for x in username if x.isalnum() or x in "-_")
     session_id = f"{safe_user}_{os.path.splitext(safe_filename)[0]}"
     
-    db_name = db_manager.get_or_create_user_db(safe_filename, session_id)
-    
-    # WIPE PROTOCOL
+    # --- WIPE PROTOCOL (Cloud Native) ---
     if clear_db:
-        if os.path.exists(db_name):
-            try:
-                os.remove(db_name)
-            except Exception as e:
-                print(f"⚠️ Could not delete DB file: {e}")
-                
-        save_path = os.path.join("Saves", f"{session_id}.sav")
-        if os.path.exists(save_path):
-            try:
-                os.remove(save_path)
-                print(f"🗑️ Wiped previous save for {session_id}")
-            except Exception as e:
-                print(f"⚠️ Could not delete save file: {e}")
+        print(f"🗑️ Wiping previous cloud database records for {session_id}...")
+        try:
+            # Instantiate our new cloud logger temporarily to execute deletes
+            logger = SQLLogger(session_id) 
+            
+            # Fix 1: Change 'messages' to 'chat_logs'
+            logger.supabase.table("chat_logs").delete().eq("session_id", session_id).execute()
+            
+            # Fix 2: Nuke the session_meta to destroy the Z-Machine save state and tick count
+            logger.supabase.table("session_meta").delete().eq("session_id", session_id).execute()
+            
+            logger.supabase.table("room_desc").delete().eq("session_id", session_id).execute()
+            logger.supabase.table("official_timeline").delete().eq("session_id", session_id).execute()
+            
+            # Optional: Wipe character memories/appearances
+            # logger.supabase.table("npc_profiles").delete().eq("session_id", session_id).execute()
+            
+            print("✅ Cloud DB wipe successful!")
+        except Exception as e:
+            print(f"⚠️ Could not delete cloud DB records: {e}")
 
-    # Re-initialize the bound DB if we just wiped it
-    db_name = db_manager.get_or_create_user_db(safe_filename, session_id)
-    
-    # Spin up the engine state
+    # Spin up the engine state 
+    # (Make sure __init__ inside JerichoController passes session_id directly to SupabaseLogger)
     controller = JerichoController(game_path, session_id)
     controller.game_name = safe_filename 
     active_sessions[session_id] = controller
@@ -85,8 +88,8 @@ def start_game():
         "message": f"Welcome back, {username}!" if controller.tick_count > 0 else f"New game started for {username}!", 
         "session_id": session_id,
         "tick": controller.tick_count,
-        "db_name": db_name,
         "game_used": safe_filename
+        # Removed "db_name" completely, as we don't return local file paths anymore!
     })
 
 @app.route('/game/<session_id>/step', methods=['POST'])
@@ -427,5 +430,21 @@ def recast_character(session_id):
         video_logger.close()
         return jsonify({"error": "Failed to generate new image"}), 500
 
+@app.route('/game/<session_id>/timeline/remove', methods=['POST'])
+def remove_from_timeline(session_id):
+    data = request.json
+    tick, room = data.get("tick"), data.get("room")
+    
+    controller = active_sessions.get(session_id)
+    if not controller: return jsonify({"error": "Invalid session"}), 404
+
+    video_logger = controller.logger
+    success = video_logger.remove_from_timeline(tick, room)
+    
+    if success:
+        return jsonify({"message": f"Removed Tick {tick} from Official Timeline!"})
+    else:
+        return jsonify({"error": "Failed to remove"}), 400
+        
 if __name__ == '__main__':
     app.run(port=5000, debug=True)

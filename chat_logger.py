@@ -518,12 +518,21 @@ class SQLLogger:
         }).eq('session_id', self.session_id).eq('name', name).execute()
 
     def update_room_desc(self, room_name, description, tick):
-        self.supabase.table('room_desc').upsert({
-            'session_id': self.session_id,
-            'room_name': room_name,
-            'description': description,
-            'tick': tick
-        }).execute()
+        data = {
+            "session_id": self.session_id, # Make sure this matches your class variable name
+            "room_name": room_name,
+            "description": description,
+            "tick": tick
+        }
+        
+        try:
+            # The on_conflict parameter is the magic key here!
+            self.supabase.table("room_desc").upsert(
+                data, 
+                on_conflict="session_id,room_name,tick" 
+            ).execute()
+        except Exception as e:
+            print(f"⚠️ Failed to upsert room description: {e}")
 
     def log_broadcast(self, tick, room, sender, receivers, message):
         """Unified logging: One row captures the whole event."""
@@ -612,7 +621,15 @@ class SQLLogger:
         res = self.supabase.table('session_meta').select('value')\
             .eq('session_id', self.session_id).eq('key', 'zmachine_state').execute()
         return res.data[0]['value'] if res.data else None
-        
+    
+    def remove_from_timeline(self, tick, room_name):
+        try:
+            self.supabase.table('official_timeline').delete().eq('session_id', self.session_id).eq('tick', tick).eq('room_name', room_name).execute()
+            return True
+        except Exception as e:
+            print(f"⚠️ Failed to remove scene from timeline: {e}")
+            return False
+            
     def close(self):
         pass # Supabase handles connection pooling automatically
 
@@ -816,6 +833,7 @@ class JerichoController:
         obs, _, _, _ = self.env.step('step')
         self.update_world_state()
         locations = self.parse_locations(obs)
+        print(locations)
         
         room_occupancy = {}
         for npc, room in locations.items():

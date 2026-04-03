@@ -451,16 +451,17 @@
                 
                 data.timeline.forEach((scene, index) => {
                     let snippet = scene.script.length > 0 ? scene.script[0].line.substring(0, 40) + "..." : "Silent action";
-                    html += `
-                        <div style="min-width: 250px; background: #333; padding: 10px; border-radius: 6px; border-left: 4px solid #dc3545;">
-                            <h4 style="margin: 0 0 5px 0;">Scene ${index + 1}</h4>
-                            <div style="font-size: 0.85em; color: #ccc;">
-                                <b>Tick:</b> ${scene.tick}<br>
-                                <b>Room:</b> ${scene.room}<br>
-                                <b>Preview:</b> <i>"${snippet}"</i>
-                            </div>
+                        html += `
+                    <div style="min-width: 250px; background: #333; padding: 10px; border-radius: 6px; border-left: 4px solid #dc3545; position: relative;">
+                        <button onclick="removeFromTimeline(${scene.tick}, '${scene.room.replace(/'/g, "\\'")}')" style="position: absolute; top: 5px; right: 5px; background: transparent; border: none; color: #ff6b6b; cursor: pointer; font-size: 1.2em;">✖</button>
+                        <h4 style="margin: 0 0 5px 0;">Scene ${index + 1}</h4>
+                        <div style="font-size: 0.85em; color: #ccc;">
+                            <b>Tick:</b> ${scene.tick}<br>
+                            <b>Room:</b> ${scene.room}<br>
+                            <b>Preview:</b> <i>"${snippet}"</i>
                         </div>
-                    `;
+                    </div>
+                `;
                 });
                 
                 container.innerHTML = html;
@@ -575,6 +576,24 @@
                     btn.style.background = "#6f42c1";
                     btn.disabled = false;
                 }, 3000);
+            }
+        }
+        async function removeFromTimeline(tick, room) {
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/timeline/remove`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tick: tick, room: room })
+                });
+                
+                if (res.ok) {
+                    // Refresh the storyboard to show the scene is gone
+                    loadTimeline(); 
+                } else {
+                    alert("Failed to remove scene.");
+                }
+            } catch (error) {
+                console.error("Remove timeline error:", error);
             }
         }
     </script>
