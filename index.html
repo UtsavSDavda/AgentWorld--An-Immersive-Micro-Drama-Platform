@@ -221,7 +221,15 @@
                             <h3 style="margin: 0 0 10px 0; color: #ffc107;">${npc.name}</h3>
                             ${imgTag}
                             <textarea id="prompt_${npc.name}" rows="3" style="width: 100%; box-sizing: border-box; background: #000; color: #fff; border: 1px solid #555; padding: 5px; margin-bottom: 10px; font-size: 0.85em;">${npc.appearance}</textarea>
-                            <button id="btn_recast_${npc.name}" onclick="recastAgent('${npc.name}')" style="width: 100%; background: #6f42c1; color: white; border: none; padding: 8px; cursor: pointer; border-radius: 4px;">✨ Recast Character</button>
+                            
+                            <div style="display: flex; gap: 5px;">
+                                <button id="btn_recast_${npc.name}" onclick="recastAgent('${npc.name}')" style="flex: 1; background: #6f42c1; color: white; border: none; padding: 8px; cursor: pointer; border-radius: 4px; font-size: 0.85em;">✨ AI</button>
+                                
+                                <label for="upload_${npc.name}" style="flex: 1; background: #28a745; color: white; text-align: center; border: none; padding: 8px; cursor: pointer; border-radius: 4px; font-weight: bold; font-size: 0.85em; display: flex; align-items: center; justify-content: center; margin: 0;">
+                                    📸 Upload
+                                </label>
+                                <input type="file" id="upload_${npc.name}" style="display: none;" accept="image/*" onchange="uploadAgentImage('${npc.name}', this)">
+                            </div>
                         </div>
                         `;
                     });
@@ -596,6 +604,49 @@
                 console.error("Remove timeline error:", error);
             }
         }
+        async function uploadAgentImage(npcName, fileInput) {
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        const formData = new FormData();
+        formData.append("image", file);
+        formData.append("npc_name", npcName);
+
+        // Grab the label so we can show loading text
+        const label = fileInput.previousElementSibling;
+        const originalText = label.innerText;
+        
+        label.innerText = "⏳...";
+        label.style.background = "#555";
+
+        try {
+            const res = await fetch(`${API_BASE}/game/${sessionId}/upload_cast_image`, {
+                method: 'POST',
+                body: formData 
+                // Note: Do not set Content-Type headers when sending FormData!
+            });
+            
+            const data = await res.json();
+            
+            if (data.image_url) {
+                document.getElementById(`img_${npcName}`).src = `${API_BASE}${data.image_url}`;
+                label.innerText = "✅ Done";
+                label.style.background = "#218838";
+            } else {
+                throw new Error(data.error || "Upload failed");
+            }
+        } catch (error) {
+            console.error("Upload error:", error);
+            label.innerText = "❌ Error";
+            label.style.background = "#dc3545";
+        } finally {
+            // Reset the button after a few seconds
+            setTimeout(() => {
+                label.innerText = originalText;
+                label.style.background = "#28a745";
+            }, 3000);
+        }
+    }
     </script>
 </body>
 </html>

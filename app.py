@@ -5,6 +5,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from chat_logger import JerichoController, GameDBManager, SQLLogger, AutomatedDirector, SceneSelector
 import time
+from PIL import Image
 
 OUTPUT_DIR = "Output_Videos"
 if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
@@ -445,6 +446,36 @@ def remove_from_timeline(session_id):
         return jsonify({"message": f"Removed Tick {tick} from Official Timeline!"})
     else:
         return jsonify({"error": "Failed to remove"}), 400
+        
+@app.route('/game/<session_id>/upload_cast_image', methods=['POST'])
+def upload_cast_image(session_id):
+    if 'image' not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+        
+    file = request.files['image']
+    npc_name = request.form.get("npc_name")
+    
+    if not file or not npc_name:
+        return jsonify({"error": "Missing file or character name"}), 400
+
+    # Ensure the directory exists
+    agent_dir = os.path.join("Assets", "Global_Agents")
+    os.makedirs(agent_dir, exist_ok=True)
+    
+    filepath = os.path.join(agent_dir, f"{npc_name}.png")
+    
+    try:
+        # Use PIL to ensure it's saved strictly as a PNG, regardless of what the user uploads
+        img = Image.open(file.stream)
+        img.save(filepath, format="PNG")
+        
+        safe_url = filepath.replace("\\", "/") # Windows safety
+        return jsonify({
+            "message": f"Successfully updated {npc_name}", 
+            "image_url": f"/{safe_url}?t={int(time.time())}"
+        })
+    except Exception as e:
+        return jsonify({"error": f"Failed to process image: {e}"}), 500
         
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
