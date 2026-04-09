@@ -72,6 +72,15 @@
         </div>
         
         <div id="recapContainer" style="margin-top: 20px;"></div>
+        <div class="flex" style="margin-top: 15px;">
+            <button id="btnSpiceUp" onclick="spiceUpStory(this)" disabled style="background: #ff5722; font-size: 1.05em; font-weight: bold;">
+                ✨ AI-Up the Story (Make it Dramatic!)
+            </button>
+        </div>
+        <div id="spicedStoryContainer" style="margin-top: 20px; display: none; background: #1a1a1a; padding: 20px; border-left: 5px solid #ff5722; border-radius: 6px;">
+            <h3 style="margin-top: 0; color: #ff5722;">🔥 The Writers' Room Cut</h3>
+            <div id="spicedStoryText" style="white-space: pre-wrap; line-height: 1.6; font-size: 1.05em; color: #ddd;"></div>
+        </div>
     </div>
     <div class="panel">
         <h2>4. The Cutting Room Floor (Episode Compiler)</h2>
@@ -159,7 +168,7 @@
                 document.getElementById("btnStep5").disabled = false;
                 document.getElementById("btnCandidates").disabled = false;
                 document.getElementById("btnRecap").disabled = false;
-                
+                document.getElementById("btnSpiceUp").disabled = false;
                 // CRITICAL: Unlock the cast button and auto-load it
                 const castBtn = document.getElementById("btnLoadCast");
                 if (castBtn) {
@@ -647,6 +656,38 @@
             }, 3000);
         }
     }
+    async function spiceUpStory(btnElement) {
+            const originalText = btnElement.innerText;
+            const originalColor = btnElement.style.background;
+
+            // Lock UI
+            btnElement.disabled = true;
+            btnElement.innerText = "✍️ Rewriting History in the Database...";
+            btnElement.style.background = "#555";
+
+            try {
+                // Now a POST request
+                const res = await fetch(`${API_BASE}/game/${sessionId}/timeline/spice`, {
+                    method: 'POST'
+                });
+                const data = await res.json();
+
+                if (data.error) {
+                    alert(data.error);
+                } else {
+                    alert(data.success);
+                    // Crucial: Reload the timeline so the user sees the new AI dialogue!
+                    loadTimeline(); 
+                }
+            } catch (error) {
+                console.error("Spice up error:", error);
+                alert("Failed to spice up the story. Check the server console.");
+            } finally {
+                btnElement.innerText = originalText;
+                btnElement.style.background = originalColor;
+                btnElement.disabled = false;
+            }
+        }
     </script>
 </body>
 </html>

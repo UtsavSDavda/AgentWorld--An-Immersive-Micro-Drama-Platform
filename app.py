@@ -476,6 +476,23 @@ def upload_cast_image(session_id):
         })
     except Exception as e:
         return jsonify({"error": f"Failed to process image: {e}"}), 500
-        
+
+@app.route('/game/<session_id>/timeline/spice', methods=['POST'])
+def spice_up_timeline(session_id):
+    """Endpoint to fetch the timeline, rewrite it, and overwrite the DB."""
+    controller = active_sessions.get(session_id)
+    if not controller: return jsonify({"error": "Invalid session"}), 404
+
+    video_logger = controller.logger
+    timeline_data = video_logger.get_official_timeline(100) 
+    
+    if not timeline_data:
+        return jsonify({"error": "Timeline is empty. Pin some scenes from Pre-Viz first!"}), 400
+
+    # Pass the logger to the director so it can overwrite the DB
+    result = director.spice_up_story(timeline_data, video_logger)
+    
+    return jsonify(result)
+
 if __name__ == '__main__':
     app.run(port=5000, debug=True)

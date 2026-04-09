@@ -629,7 +629,28 @@ class SQLLogger:
         except Exception as e:
             print(f"⚠️ Failed to remove scene from timeline: {e}")
             return False
+
+    def overwrite_scene_dialogue(self, tick, room_name, new_script):
+        """Deletes old chat logs for a specific scene and inserts the rewritten AI script."""
+        try:
+            # 1. Nuke the old, boring conversation
+            self.supabase.table('chat_logs').delete().eq('session_id', self.session_id).eq('tick', tick).eq('room_name', room_name).execute()
             
+            # 2. Insert the new, dramatic lines
+            for msg in new_script:
+                self.supabase.table('chat_logs').insert({
+                    'session_id': self.session_id,
+                    'tick': tick,
+                    'room_name': room_name,
+                    'sender': msg['speaker'],
+                    'receiver': 'ALL', # Simplified for the rewrite
+                    'message': msg['line']
+                }).execute()
+            return True
+        except Exception as e:
+            print(f"⚠️ Failed to overwrite dialogue for Tick {tick}: {e}")
+            return False
+              
     def close(self):
         pass # Supabase handles connection pooling automatically
 
@@ -1603,6 +1624,78 @@ class AutomatedDirector:
 
         except subprocess.CalledProcessError as e:
             print(f"❌ FFmpeg sync failed: {e}")
+
+    def spice_up_story(self, timeline_data, db_logger):
+        """Rewrites the timeline into a dynamic script and OVERWRITES the database."""
+        if not timeline_data:
+            return {"error": "The timeline is empty."}
+
+        known_rooms = set(scene['room'] for scene in timeline_data)
+        known_chars = set()
+        
+        raw_log = []
+        for scene in timeline_data:
+            scene_obj = {
+                "tick": scene['tick'],
+                "room": scene['room'],
+                "script": [{"speaker": line['speaker'], "line": line['line']} for line in scene['script']]
+            }
+            for line in scene['script']:
+                known_chars.add(line['speaker'])
+            raw_log.append(scene_obj)
+
+        allowed_rooms_str = ", ".join(known_rooms)
+        allowed_chars_str = ", ".join(known_chars)
+
+        prompt = f"""
+        You are the Showrunner for a cinematic web series. 
+        I will provide a JSON array of scenes (tick, room, and script).
+        
+        Your job is to REWRITE the 'script' array for each scene to make the story significantly more dramatic, eventful, and connected to a larger plot.
+        - You may add new dialogue lines or actions (denoted by *asterisks*).
+        - Keep the 'tick' and 'room' exactly the same.
+        - ALLOWED CAST: {allowed_chars_str}. Do NOT invent new characters.
+        
+        RAW INPUT:
+        {json.dumps(raw_log)}
+        
+        Output ONLY a JSON array in this EXACT format:
+        [
+          {{
+            "tick": 1,
+            "room": "Kitchen",
+            "script": [
+              {{"speaker": "Alice", "line": "Why is there blood on the counter?"}},
+              {{"speaker": "Bob", "line": "*Freezes* It's just tomato sauce."}}
+            ]
+          }}
+        ]
+        """
+        
+        print("✍️ The Showrunner is rewriting the database...")
+        try:
+            response = client.models.generate_content(
+                model=TEXT_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            
+            # Extract and parse the JSON
+            new_storyline = json.loads(response.text)
+            
+            # Execute the Database Overwrite!
+            for scene in new_storyline:
+                db_logger.overwrite_scene_dialogue(
+                    tick=scene['tick'], 
+                    room_name=scene['room'], 
+                    new_script=scene['script']
+                )
+                
+            return {"success": "The timeline has been successfully rewritten and saved to the database!"}
+            
+        except Exception as e:
+            print(f"❌ Failed to write the script: {e}")
+            return {"error": f"Failed to generate the script: {str(e)}"}
 
 class SceneSelector:
 
