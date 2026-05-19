@@ -88,12 +88,13 @@
         
         <div class="flex" style="margin-bottom: 15px;">
             <button onclick="loadTimeline()" style="background: #17a2b8;">🔄 Refresh Storyboard</button>
-            <button id="btnCompile" onclick="compileEpisode(this)" disabled style="background: #dc3545; font-size: 1.1em;">
-                🎬 RENDER FULL EPISODE (Veo)
+            
+            <button id="btnDownloadTimeline" onclick="downloadTimeline()" disabled style="background: #28a745; font-weight: bold;">
+                💾 Download Storyboard Script
             </button>
         </div>
+        
         <div class="flex" style="margin-bottom: 15px;">
-            <button onclick="loadTimeline()" style="background: #17a2b8;">🔄 Refresh Storyboard</button>
             <button id="btnCompileAnimatic" onclick="compileEpisode(this, 'stills')" disabled style="background: #ffc107; color: #000; font-size: 1.1em; font-weight: bold;">
                 🖼️ RENDER ANIMATIC EPISODE
             </button>
@@ -277,10 +278,8 @@
                 let finalHtml = "";
                 
                 data.candidates.forEach(scene => {
-                    let imgTags = Object.values(scene.images).map(path => 
-                        `<img src="${API_BASE}/${path.replace(/\\/g, '/')}" alt="Master Shot">`
-                    ).join("");
-
+                    let imgTags = Object.values(scene.images).map(url => 
+                    `<img src="${url}" alt="Master Shot">`).join("");
                     let scriptTags = scene.script.map(line => 
                         `<div><b>${line.speaker}:</b> ${line.line}</div>`
                     ).join("");
@@ -459,11 +458,13 @@
                     container.innerHTML = "<p style='color:#ffc107;'>Timeline is empty. Pin some scenes from Pre-Viz first!</p>";
                     document.getElementById("btnCompile").disabled = true;
                     document.getElementById("btnCompileAnimatic").disabled = true;
+                    document.getElementById("btnDownloadTimeline").disabled = true;
                     return;
                 }
                 
                 document.getElementById("btnCompile").disabled = false;
                 document.getElementById("btnCompileAnimatic").disabled = false;
+                document.getElementById("btnDownloadTimeline").disabled = false;
                 let html = "";
                 
                 data.timeline.forEach((scene, index) => {
@@ -576,7 +577,7 @@
                 
                 if (data.image_url) {
                     // Update the image src instantly! The ?t= timestamp forces Chrome to bypass cache.
-                    document.getElementById(`img_${npcName}`).src = `${API_BASE}${data.image_url}`;
+                    document.getElementById(`img_${npcName}`).src = data.image_url;
                     btn.innerText = "✅ Recast Successful!";
                     btn.style.background = "#28a745";
                 } else {
@@ -638,7 +639,7 @@
             const data = await res.json();
             
             if (data.image_url) {
-                document.getElementById(`img_${npcName}`).src = `${API_BASE}${data.image_url}`;
+                document.getElementById(`img_${npcName}`).src = data.image_url;
                 label.innerText = "✅ Done";
                 label.style.background = "#218838";
             } else {
@@ -686,6 +687,67 @@
                 btnElement.innerText = originalText;
                 btnElement.style.background = originalColor;
                 btnElement.disabled = false;
+            }
+        }
+        async function downloadTimeline() {
+            const btn = document.getElementById("btnDownloadTimeline");
+            const originalText = btn.innerText;
+            btn.innerText = "⏳ Preparing Download...";
+            btn.disabled = true;
+
+            try {
+                // Fetch the current official timeline from the backend
+                const res = await fetch(`${API_BASE}/game/${sessionId}/timeline`);
+                const data = await res.json();
+
+                if (!data.timeline || data.timeline.length === 0) {
+                    alert("The timeline is empty! Pin some scenes first.");
+                    return;
+                }
+
+                // Format the data into a readable script
+                let scriptText = "=========================================\n";
+                scriptText += `JERICHO STUDIO: OFFICIAL STORYBOARD\n`;
+                scriptText += `Session ID: ${sessionId}\n`;
+                scriptText += "=========================================\n\n";
+
+                data.timeline.forEach((scene, index) => {
+                    scriptText += `SCENE ${index + 1}\n`;
+                    scriptText += `LOCATION: ${scene.room.toUpperCase()}\n`;
+                    scriptText += `TIME: Tick ${scene.tick}\n`;
+                    scriptText += `-----------------------------------------\n`;
+                    
+                    if (scene.script && scene.script.length > 0) {
+                        scene.script.forEach(line => {
+                            scriptText += `${line.speaker}: ${line.line}\n`;
+                        });
+                    } else {
+                        scriptText += `(Silent Scene / Action Only)\n`;
+                    }
+                    scriptText += `\n`; // Add some spacing between scenes
+                });
+
+                // Create a "Blob" (a chunk of data) to hold our text
+                const blob = new Blob([scriptText], { type: "text/plain" });
+                const url = window.URL.createObjectURL(blob);
+
+                // Create a temporary, hidden link element to trigger the download
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `Storyboard_${sessionId}.txt`; 
+                document.body.appendChild(a); // Append to DOM to make it work in Firefox
+                a.click(); // Simulate a click
+                
+                // Clean up the temporary link
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+
+            } catch (error) {
+                console.error("Error downloading timeline:", error);
+                alert("Failed to download storyboard. Check the console.");
+            } finally {
+                btn.innerText = originalText;
+                btn.disabled = false;
             }
         }
     </script>

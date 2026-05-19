@@ -292,6 +292,7 @@ def render_full_episode(session_id):
 
     def run_episode_job():
         clip_paths = []
+        master_episode_script = [] # <-- NEW: List to hold the entire episode's script
         directions = ["north", "east", "south", "west"]
         
         mode_label = "ANIMATIC" if mode == "stills" else "VEO"
@@ -302,33 +303,35 @@ def render_full_episode(session_id):
             room_name = scene["room"]
             safe_room = room_name.replace(" ", "_").replace("'", "")
             
-            # Look for the correct clip type based on the requested mode
             clip_prefix = "animatic" if mode == "stills" else "final_render"
             expected_clip = os.path.join(OUTPUT_DIR, f"{clip_prefix}_{controller.game_name}_{safe_room}_tick{tick}.mp4")
             
+            # ---> Existing Script Extraction logic
+            agents, formatted_script, speakers = [], [], set()
+            videomaker = SceneSelector(db=video_logger, director=director, key_terms=[], game_name=controller.game_name)
+            
+            for line in scene["script"]:
+                speaker = line["speaker"]
+                emotion = videomaker._detect_emotion_nrc(line["line"])
+                voice_id = video_logger.get_npc_voice(speaker)
+                formatted_script.append((speaker, line["line"], emotion, voice_id))
+                
+                if speaker not in speakers:
+                    assigned_wall = directions[len(speakers) % 4]
+                    agents.append({"name": speaker, "desc": "A character", "facing": assigned_wall})
+                    speakers.add(speaker)
+            
+            # --- NEW: Append this scene's formatted script to the master list ---
+            master_episode_script.extend(formatted_script)
+
+            # ... (Existing rendering/checking logic remains unchanged)
             if os.path.exists(expected_clip):
                 print(f"♻️ Found existing {mode_label} render for Tick {tick}. Skipping generation.")
                 clip_paths.append(expected_clip)
             else:
                 print(f"🎥 Rendering missing {mode_label} clip for Tick {tick}...")
-                
-                agents, formatted_script, speakers = [], [], set()
-                videomaker = SceneSelector(db=video_logger, director=director, key_terms=[], game_name=controller.game_name)
-                
-                for line in scene["script"]:
-                    speaker = line["speaker"]
-                    emotion = videomaker._detect_emotion_nrc(line["line"])
-                    voice_id = video_logger.get_npc_voice(speaker)
-                    formatted_script.append((speaker, line["line"], emotion, voice_id))
-                    
-                    if speaker not in speakers:
-                        assigned_wall = directions[len(speakers) % 4]
-                        agents.append({"name": speaker, "desc": "A character", "facing": assigned_wall})
-                        speakers.add(speaker)
-                
                 scene_assets = director.prepare_scene_assets(scene["visual"], agents, controller.game_name, room_name)
                 
-                # Route to the correct filming method
                 if mode == "stills":
                     director.film_scene_stills(formatted_script, scene_assets, controller.game_name, room_name, expected_clip)
                 else:
@@ -351,6 +354,18 @@ def render_full_episode(session_id):
             ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             os.remove(list_file)
+
+            # --- NEW: Save the Master Episode Transcript ---
+            script_path = output_path.rsplit('.', 1)[0] + '.txt'
+            try:
+                with open(script_path, "w", encoding="utf-8") as f:
+                    f.write(f"--- FULL EPISODE TRANSCRIPT: {controller.game_name} ---\n\n")
+                    for speaker, line, emotion, _ in master_episode_script:
+                        f.write(f"[{emotion.upper()}] {speaker}: {line.strip()}\n\n")
+                print(f"📄 Master Episode Transcript saved to {script_path}")
+            except Exception as e:
+                print(f"⚠️ Failed to save master transcript: {e}")
+
             print(f"🍿 EPISODE COMPLETE: {output_path}")
             
         video_logger.close()

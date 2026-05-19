@@ -28,17 +28,18 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import pickle
 from supabase import create_client, Client
+import mimetypes
 
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
+print(GEMINI_API_KEY)
 client = genai.Client(api_key=GEMINI_API_KEY)
-model = "gemini-2.0-flash"
+model = "gemini-2.5-flash"
 vid_model = "veo-3.1-fast-generate-preview"
 IMG_MODEL = "imagen-4.0-fast-generate-001"
 VID_MODEL = "veo-3.1-fast-generate-preview"
-TEXT_MODEL = "gemini-2.0-flash"
+TEXT_MODEL = "gemini-2.5-flash"
 video_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # --- DATABASE LOGGER ---
@@ -650,7 +651,45 @@ class SQLLogger:
         except Exception as e:
             print(f"⚠️ Failed to overwrite dialogue for Tick {tick}: {e}")
             return False
-              
+
+    def overwrite_narrative_arc(self, min_tick, max_tick, new_scenes):
+        """Wipes a chunk of simulation history and replaces it with the AI's cinematic pacing."""
+        try:
+            # 1. Clear the old, boring timeline and chat logs for this entire block
+            self.supabase.table('official_timeline').delete().eq('session_id', self.session_id).gte('tick', min_tick).lte('tick', max_tick).execute()
+            self.supabase.table('chat_logs').delete().eq('session_id', self.session_id).gte('tick', min_tick).lte('tick', max_tick).execute()
+
+            # 2. Insert the newly paced scenes. 
+            # We assign them sequential ticks starting from min_tick.
+            current_tick = min_tick
+            for scene in new_scenes:
+                room_name = scene['room']
+                
+                # Pin the new scene to the official timeline
+                self.supabase.table('official_timeline').insert({
+                    'session_id': self.session_id,
+                    'tick': current_tick,
+                    'room_name': room_name
+                }).execute()
+                
+                # Insert the new, dramatic dialogue
+                for msg in scene['script']:
+                    self.supabase.table('chat_logs').insert({
+                        'session_id': self.session_id,
+                        'tick': current_tick,
+                        'room_name': room_name,
+                        'sender': msg['speaker'],
+                        'receiver': 'ALL',
+                        'message': msg['line']
+                    }).execute()
+                    
+                current_tick += 1 # Advance Narrative Time
+                
+            return True
+        except Exception as e:
+            print(f"⚠️ Failed to overwrite narrative arc: {e}")
+            return False
+
     def close(self):
         pass # Supabase handles connection pooling automatically
 
@@ -741,6 +780,36 @@ class JerichoController:
         for match in pattern.finditer(observation_text):
             locations[match.group(1).strip()] = match.group(2).strip()
         return locations
+    
+    def parse_events(self, observation_text) -> list:
+        """Safely parses DATA_EVENT strings line-by-line."""
+        print("Entered parse events")
+        events = []
+        
+        # Split the text into individual lines to isolate the logs
+        for line in observation_text.splitlines():
+            line = line.strip()
+            
+            # Only process lines that explicitly start with our tag
+            if line.startswith("DATA_EVENT:"):
+                # Remove the tag itself
+                clean_line = line.replace("DATA_EVENT:", "", 1).strip()
+                
+                # Split the remaining string by the pipe delimiter
+                parts = [part.strip() for part in clean_line.split("|")]
+                
+                # Safety check: Only add the event if we successfully extracted all 4 parts
+                if len(parts) >= 4:
+                    events.append({
+                        "agent": parts[0],
+                        "action": parts[1],
+                        "target": parts[2],
+                        "room": parts[3]
+                    })
+                else:
+                    print(f"⚠️ Warning: Malformed event string from Inform: {line}")
+        print(events)            
+        return events
 
     def parse_room_data(self, observation_text):
         pattern = re.compile(
@@ -853,8 +922,16 @@ class JerichoController:
         
         obs, _, _, _ = self.env.step('step')
         self.update_world_state()
+        
+        # --- NEW: Parse data from the observation text ---
         locations = self.parse_locations(obs)
-        print(locations)
+        events = self.parse_events(obs)
+        
+        # Optional: Print events to terminal so you can see the NPCs acting
+        for event in events:
+            print(f"🎬 [EVENT] {event['agent']} -> {event['action']} ({event['target']}) in {event['room']}")
+
+        print(f"📍 Positions: {locations}")
         
         room_occupancy = {}
         for npc, room in locations.items():
@@ -881,10 +958,68 @@ class JerichoController:
         finally:
             self.logger.close()
 
+class CloudStorageManager:
+    """Handles uploading, downloading, and caching files with Supabase Storage."""
+    def __init__(self):
+        # Automatically grab credentials and create the client
+        url: str = os.getenv("SUPABASE_URL")
+        key: str = os.getenv("SUPABASE_KEY")
+        if not url or not key:
+            raise ValueError("Supabase credentials missing in .env")
+        
+        self.supabase: Client = create_client(url, key)
+        self.assets_bucket = 'jericho-assets'
+        self.videos_bucket = 'jericho-videos'
+
+    def file_exists(self, bucket, cloud_path):
+        """Checks if a file exists in the cloud by trying to get its public URL and checking the response."""
+        try:
+            # list() is safer but slightly slower. A quick way is to check the folder contents.
+            folder = os.path.dirname(cloud_path)
+            file_name = os.path.basename(cloud_path)
+            files = self.supabase.storage.from_(bucket).list(folder)
+            
+            # If the folder doesn't exist, it returns an empty list or error
+            if files:
+                for f in files:
+                    if f['name'] == file_name:
+                        return True
+            return False
+        except Exception:
+            return False
+
+    def get_public_url(self, bucket, cloud_path):
+        """Returns the public URL for the frontend."""
+        return self.supabase.storage.from_(bucket).get_public_url(cloud_path)
+
+    def upload_file(self, bucket, local_path, cloud_path):
+        """Uploads a local file to Supabase and returns the public URL."""
+        content_type, _ = mimetypes.guess_type(local_path)
+        if not content_type: content_type = 'application/octet-stream'
+
+        with open(local_path, 'rb') as f:
+            self.supabase.storage.from_(bucket).upload(
+                file=f,
+                path=cloud_path,
+                file_options={"content-type": content_type, "upsert": "true"}
+            )
+        return self.get_public_url(bucket, cloud_path)
+
+    def download_file(self, bucket, cloud_path, local_destination):
+        """Downloads a cloud file to the local PC for FFmpeg or MediaPipe processing."""
+        if not os.path.exists(os.path.dirname(local_destination)):
+            os.makedirs(os.path.dirname(local_destination), exist_ok=True)
+            
+        with open(local_destination, 'wb') as f:
+            res = self.supabase.storage.from_(bucket).download(cloud_path)
+            f.write(res)
+        return local_destination
+
 class AutomatedDirector:
     def __init__(self):
         self.assets = {} 
         self.model_path = 'selfie_segmenter.tflite'
+        self.storage = CloudStorageManager()
         self._ensure_mediapipe_model()
 
     def _ensure_mediapipe_model(self):
@@ -1015,54 +1150,68 @@ class AutomatedDirector:
             return None
 
     def create_agent_plate(self, agent_name, agent_desc, custom_prompt=None, force_recreate=False):
-        """Generates a reusable character cutout. Now supports forced regeneration."""
-        agent_dir = os.path.join("Assets", "Global_Agents")
-        os.makedirs(agent_dir, exist_ok=True)
-        filepath = os.path.join(agent_dir, f"{agent_name}.png")
+        """Generates an agent, uploads to cloud, and caches locally only when needed."""
+        cloud_path = f"Global_Agents/{agent_name}.png"
+        local_temp_path = os.path.join("Assets", "Global_Agents", f"{agent_name}.png")
+        
+        # 1. Cloud Cache Check
+        if not force_recreate and self.storage.file_exists(self.storage.assets_bucket, cloud_path):
+            print(f"♻️ Cloud Cache Hit: {agent_name}")
+            return self.storage.get_public_url(self.storage.assets_bucket, cloud_path)
 
-        # Bypass cache if the user explicitly clicked "Recast"
-        if os.path.exists(filepath) and not force_recreate:
-            return filepath
+        # 2. LOCAL RECOVERY: Upload existing local files to bypass the API
+        if not force_recreate and os.path.exists(local_temp_path):
+            print(f"💾 Found existing local file for {agent_name}. Migrating to cloud...")
+            try:
+                return self.storage.upload_file(self.storage.assets_bucket, local_temp_path, cloud_path)
+            except Exception as e:
+                print(f"⚠️ Failed to migrate local asset: {e}")
 
-        # If user provides a custom prompt, use it. Otherwise use the AI-generated desc.
+        # 3. Generate via API (Will throw your 400 error if hit, but should be avoided now)
         base_desc = custom_prompt if custom_prompt else agent_desc
-
-        prompt = f"""
-        Cinematic mid-shot of {base_desc}.
-        The character is facing the camera.
-        ENVIRONMENT: ISOLATED CHARACTER ON A SOLID, FLAT, LIGHT GREY BACKGROUND. 
-        Absolutely no scenery, no props, no background objects. Clean studio lighting.
-        """
+        prompt = f"Cinematic mid-shot of {base_desc}. The character is facing the camera. ENVIRONMENT: ISOLATED CHARACTER ON A SOLID, FLAT, LIGHT GREY BACKGROUND. Absolutely no scenery, no props, no background objects. Clean studio lighting."
         
         print(f"📸 Photographing Agent: {agent_name}...")
         try:
+            os.makedirs(os.path.dirname(local_temp_path), exist_ok=True)
             response = client.models.generate_images(
                 model=IMG_MODEL,
                 prompt=prompt,
                 config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio="1:1")
             )
-            response.generated_images[0].image.save(filepath)
-            return filepath
+            response.generated_images[0].image.save(local_temp_path)
+            
+            # Upload to Cloud
+            public_url = self.storage.upload_file(self.storage.assets_bucket, local_temp_path, cloud_path)
+            return public_url
+            
         except Exception as e:
             print(f"❌ Failed to photograph {agent_name}: {e}")
             return None
 
     def create_background_plate(self, room_data, game_name, room_name, facing_direction):
-        """Generates the empty background wall."""
-        cache_dir = self.get_room_cache_dir(game_name, room_name)
-        filepath = os.path.join(cache_dir, f"wall_{facing_direction}.png")
-
-        if os.path.exists(filepath):
-            return filepath
-
-        bg_feature = room_data.get(facing_direction, room_data.get('north', 'Empty'))
+        """Generates the empty background wall and migrates local files if API is locked."""
+        cloud_path = f"{game_name}/{room_name}/wall_{facing_direction}.png"
         
-        # Prompt explicitly requests NO people
-        prompt = f"""
-        Empty background plate, no people, no characters.
-        Location style: {room_data['materials']}.
-        Visible background: {bg_feature}.
-        """
+        # Determine where the old local script would have saved this
+        cache_dir = self.get_room_cache_dir(game_name, room_name)
+        local_temp_path = os.path.join(cache_dir, f"wall_{facing_direction}.png")
+
+        # 1. Cloud Cache Check
+        if self.storage.file_exists(self.storage.assets_bucket, cloud_path):
+            return self.storage.get_public_url(self.storage.assets_bucket, cloud_path)
+
+        # 2. LOCAL RECOVERY: Upload existing local backgrounds to bypass the API
+        if os.path.exists(local_temp_path):
+            print(f"💾 Found existing local background for {room_name} ({facing_direction}). Migrating to cloud...")
+            try:
+                return self.storage.upload_file(self.storage.assets_bucket, local_temp_path, cloud_path)
+            except Exception as e:
+                print(f"⚠️ Failed to migrate local background: {e}")
+
+        # 3. Generate via API
+        bg_feature = room_data.get(facing_direction, room_data.get('north', 'Empty'))
+        prompt = f"Empty background plate, no people, no characters. Location style: {room_data['materials']}. Visible background: {bg_feature}."
         if room_data.get('is_indoors', True):
             prompt += " Environment: INTERIOR. Enclosed space. Ceiling visible. No sky."
 
@@ -1073,32 +1222,51 @@ class AutomatedDirector:
                 prompt=prompt,
                 config=types.GenerateImagesConfig(number_of_images=1, aspect_ratio="16:9")
             )
-            response.generated_images[0].image.save(filepath)
-            return filepath
+            response.generated_images[0].image.save(local_temp_path)
+            
+            public_url = self.storage.upload_file(self.storage.assets_bucket, local_temp_path, cloud_path)
+            return public_url
         except Exception as e:
             print(f"❌ Failed to paint background: {e}")
             return None
 
     # --- UPDATED MEDIAPIPE COMPOSITING METHOD ---
-    def composite_scene_master(self, agent_path, bg_path, game_name, room_name, agent_name, facing):
-        """Cuts the agent out and pastes them onto the background plate using MediaPipe segmentation."""
-        cache_dir = self.get_room_cache_dir(game_name, room_name)
-        output_path = os.path.join(cache_dir, f"scene_master_{agent_name}_facing_{facing}.png")
+    def composite_scene_master(self, agent_url, bg_url, game_name, room_name, agent_name, facing):
+        """
+        Cuts the agent out and pastes them onto the background plate using MediaPipe segmentation.
+        Operates entirely as a Cloud Worker: Fetches URLs, processes locally, uploads result, and cleans up.
+        """
+        # 1. Define the final cloud destination path
+        cloud_output_path = f"{game_name}/{room_name}/scene_master_{agent_name}_facing_{facing}.png"
+        
+        # 2. Check Cloud Cache First
+        if self.storage.file_exists(self.storage.assets_bucket, cloud_output_path):
+            print(f"♻️ Cloud Cache Hit for Composite: {agent_name} in {room_name}")
+            return self.storage.get_public_url(self.storage.assets_bucket, cloud_output_path)
 
-        if os.path.exists(output_path):
-            return output_path
-
-        print(f"✂️ Compositing {agent_name} into {room_name} via MediaPipe...")
+        print(f"✂️ Fetching assets to local PC for MediaPipe Compositing...")
+        
+        # 3. Define temporary local file paths for the worker node
+        safe_room_name = room_name.replace(" ", "_").replace("'", "")
+        temp_agent = f"temp_agent_{agent_name}.png"
+        temp_bg = f"temp_bg_{safe_room_name}.png"
+        temp_output = f"temp_comp_{agent_name}.png"
+        
         try:
-            # 1. Load the images
-            person_img = cv2.imread(agent_path)
-            bg_img = cv2.imread(bg_path)
+            # 4. Fetch required assets from the cloud to the local PC
+            import urllib.request
+            urllib.request.urlretrieve(agent_url, temp_agent)
+            urllib.request.urlretrieve(bg_url, temp_bg)
+
+            # 5. Load the downloaded images via OpenCV
+            person_img = cv2.imread(temp_agent)
+            bg_img = cv2.imread(temp_bg)
 
             if person_img is None or bg_img is None:
-                print("Error: Could not read images. Check your file paths.")
+                print("❌ Error: Could not read downloaded images for compositing.")
                 return None
 
-            # 2. Setup the MediaPipe Tasks options using the pre-loaded model path
+            # 6. Setup MediaPipe Segmenter
             base_options = python.BaseOptions(model_asset_path=self.model_path)
             options = vision.ImageSegmenterOptions(
                 base_options=base_options,
@@ -1107,7 +1275,6 @@ class AutomatedDirector:
                 output_confidence_masks=True 
             )
 
-            # 3. Initialize the Segmenter and process the image
             with vision.ImageSegmenter.create_from_options(options) as segmenter:
                 # Resize person to maintain the 85% cinematic height ratio
                 bh, bw, _ = bg_img.shape
@@ -1117,7 +1284,6 @@ class AutomatedDirector:
                 aspect_ratio = pw / ph
                 target_width = int(target_height * aspect_ratio)
                 
-                # Resize person FIRST so the mask matches exactly what we will blend
                 person_resized = cv2.resize(person_img, (target_width, target_height), interpolation=cv2.INTER_LANCZOS4)
 
                 # Convert BGR (OpenCV) to RGB for MediaPipe
@@ -1128,11 +1294,11 @@ class AutomatedDirector:
                 segmentation_result = segmenter.segment(mp_image)
                 person_mask = segmentation_result.confidence_masks[0].numpy_view()
 
-                # 4. Smooth the mask for a natural look
+                # Smooth the mask for a natural blend
                 person_mask_blurred = cv2.GaussianBlur(person_mask, (7, 7), 0)
                 mask_3d = np.stack((person_mask_blurred,) * 3, axis=-1)
 
-                # 5. Composite the images using Alpha Blending (calculating Region of Interest)
+                # Composite the images using Alpha Blending
                 x_offset = (bw - target_width) // 2
                 y_offset = bh - target_height
 
@@ -1142,17 +1308,30 @@ class AutomatedDirector:
                 background = (roi * (1 - mask_3d)).astype(np.uint8)
                 blended = cv2.add(foreground, background)
 
+                # Overwrite the Region of Interest in the background image with the blended result
                 bg_img[y_offset:y_offset+target_height, x_offset:x_offset+target_width] = blended
 
-                # 6. Save the final result
-                cv2.imwrite(output_path, bg_img)
-                print(f"✅ Success! Saved to {output_path}")
-                return output_path
-                
+                # Save the final stitched image to our temporary output file
+                cv2.imwrite(temp_output, bg_img)
+
+            # 7. Upload the stitched result back to the cloud
+            public_url = self.storage.upload_file(self.storage.assets_bucket, temp_output, cloud_output_path)
+            print(f"✅ Success! Uploaded composite to {public_url}")
+            return public_url
+            
         except Exception as e:
             print(f"❌ Compositing failed: {e}")
+            return None
             
-        return None
+        finally:
+            # 8. Clean up local worker space
+            # This 'finally' block executes no matter what happens above, keeping your disk clean.
+            for temp_file in [temp_agent, temp_bg, temp_output]:
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except OSError:
+                        pass
 
     def prepare_scene_assets(self, room_description, agents, game_name, room_name):
         """Phase 1: Generates the master composited images using your MediaPipe pipeline."""
@@ -1175,10 +1354,25 @@ class AutomatedDirector:
                     scene_assets[name] = comp_path
                 
         return scene_assets
+    
+    def _save_transcript(self, script, video_filename):
+        """Saves a .txt transcript alongside the generated video."""
+        # Replace .mp4 with .txt safely, ensuring the exact same ID
+        script_path = video_filename.rsplit('.', 1)[0] + '.txt'
+        try:
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write("--- SCENE TRANSCRIPT ---\n\n")
+                for speaker, line, emotion, _ in script:
+                    clean_line = line.strip()
+                    f.write(f"[{emotion.upper()}] {speaker}: {clean_line}\n\n")
+            print(f"📄 Transcript saved to {script_path}")
+        except Exception as e:
+            print(f"⚠️ Failed to save transcript for {video_filename}: {e}")
 
     def film_scene(self, script, scene_assets, game_name, room_name, output_filename, continuity=False):
         """Phase 2: Sends the cached MediaPipe composites to Veo and syncs TTS."""
         
+        self._save_transcript(script, output_filename)
         clips = []
         last_frame_path = None
 
@@ -1302,6 +1496,9 @@ class AutomatedDirector:
     
     def film_scene_stills(self, script, scene_assets, game_name, room_name, output_filename):
         """Phase 2 Alternative: Generates an animatic using static images and TTS (No Veo)."""
+        
+        self._save_transcript(script, output_filename)
+        
         clips = []
 
         for i, (speaker, line, emotion, voice_id) in enumerate(script):
@@ -1626,17 +1823,26 @@ class AutomatedDirector:
             print(f"❌ FFmpeg sync failed: {e}")
 
     def spice_up_story(self, timeline_data, db_logger):
-        """Rewrites the timeline into a dynamic script and OVERWRITES the database."""
+        """
+        Executes the untethered 3-Step Writers' Room Pipeline.
+        The AI determines the final scene count and pacing.
+        """
         if not timeline_data:
             return {"error": "The timeline is empty."}
 
-        known_rooms = set(scene['room'] for scene in timeline_data)
+        known_rooms = set()
         known_chars = set()
-        
         raw_log = []
+        
+        # We need the boundaries to know what chunk of the database to replace
+        ticks = [scene['tick'] for scene in timeline_data]
+        min_tick, max_tick = min(ticks), max(ticks)
+        
+        # 1. Gather all raw context
         for scene in timeline_data:
+            known_rooms.add(scene['room'])
             scene_obj = {
-                "tick": scene['tick'],
+                "original_tick": scene['tick'],
                 "room": scene['room'],
                 "script": [{"speaker": line['speaker'], "line": line['line']} for line in scene['script']]
             }
@@ -1647,32 +1853,56 @@ class AutomatedDirector:
         allowed_rooms_str = ", ".join(known_rooms)
         allowed_chars_str = ", ".join(known_chars)
 
+        char_context = ""
+        for char in known_chars:
+            profile = db_logger.get_npc_profile(char)
+            if profile:
+                char_context += f"- {char}: {profile[0]}\n"
+
+        # 2. The Untethered Showrunner Prompt
         prompt = f"""
-        You are the Showrunner for a cinematic web series. 
-        I will provide a JSON array of scenes (tick, room, and script).
+        You are the Lead Showrunner for a cinematic series. You must process the raw simulation logs into a tightly paced, highly dramatic episode.
         
-        Your job is to REWRITE the 'script' array for each scene to make the story significantly more dramatic, eventful, and connected to a larger plot.
-        - You may add new dialogue lines or actions (denoted by *asterisks*).
-        - Keep the 'tick' and 'room' exactly the same.
-        - ALLOWED CAST: {allowed_chars_str}. Do NOT invent new characters.
+        ALLOWED CAST: [{allowed_chars_str}]
+        CAST PERSONAS:
+        {char_context}
+        ALLOWED LOCATIONS: [{allowed_rooms_str}]
         
-        RAW INPUT:
+        RAW SIMULATION LOGS (For inspiration only):
         {json.dumps(raw_log)}
         
-        Output ONLY a JSON array in this EXACT format:
-        [
-          {{
-            "tick": 1,
-            "room": "Kitchen",
-            "script": [
-              {{"speaker": "Alice", "line": "Why is there blood on the counter?"}},
-              {{"speaker": "Bob", "line": "*Freezes* It's just tomato sauce."}}
+        You must output a strictly formatted JSON object that follows a 3-step creative pipeline:
+        
+        STEP 1: "plot_setup" 
+        Define the current stakes based on the raw logs. What is the overarching mystery, goal, or threat connecting these characters right now?
+        
+        STEP 2: "birds_eye_view"
+        Write a compressed plot outline. How does the story progress? What is the narrative arc?
+        
+        STEP 3: "scenes"
+        Write the actual dialogue. 
+        CRITICAL INSTRUCTION: DO NOT copy the pacing of the raw logs. You have total freedom to restructure the timeline. If the raw logs took 10 boring steps to do something, condense it into 2 or 3 highly dramatic scenes. 
+        - You decide how many scenes are needed to tell the story from Step 2.
+        - You decide which allowed characters are in which allowed rooms for each scene.
+        - Dialogue MUST be purposeful. No aimless bickering.
+        
+        Output ONLY valid JSON matching this exact structure:
+        {{
+            "plot_setup": "...",
+            "birds_eye_view": "...",
+            "scenes": [
+                {{
+                    "room": "Kitchen",
+                    "script": [
+                        {{"speaker": "Alice", "line": "..."}},
+                        {{"speaker": "Bob", "line": "*looks around nervously* ..."}}
+                    ]
+                }}
             ]
-          }}
-        ]
+        }}
         """
         
-        print("✍️ The Showrunner is rewriting the database...")
+        print("✍️ The Writers' Room is breaking the story and restructuring the timeline...")
         try:
             response = client.models.generate_content(
                 model=TEXT_MODEL,
@@ -1680,18 +1910,26 @@ class AutomatedDirector:
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
             
-            # Extract and parse the JSON
-            new_storyline = json.loads(response.text)
+            master_script = json.loads(response.text)
             
-            # Execute the Database Overwrite!
-            for scene in new_storyline:
-                db_logger.overwrite_scene_dialogue(
-                    tick=scene['tick'], 
-                    room_name=scene['room'], 
-                    new_script=scene['script']
-                )
-                
-            return {"success": "The timeline has been successfully rewritten and saved to the database!"}
+            print("\n=== AI SHOWRUNNER NOTES ===")
+            print(f"🎬 PLOT SETUP:\n{master_script.get('plot_setup', 'None')}\n")
+            print(f"🗺️ OUTLINE:\n{master_script.get('birds_eye_view', 'None')}\n")
+            print("===========================\n")
+            
+            new_storyline = master_script.get("scenes", [])
+            
+            # Execute the Arc Replacement!
+            success = db_logger.overwrite_narrative_arc(
+                min_tick=min_tick, 
+                max_tick=max_tick, 
+                new_scenes=new_storyline
+            )
+            
+            if success:
+                return {"success": f"Timeline restructured! Compressed {len(timeline_data)} simulation ticks into {len(new_storyline)} cinematic scenes."}
+            else:
+                return {"error": "Failed to save the new arc to the database."}
             
         except Exception as e:
             print(f"❌ Failed to write the script: {e}")
