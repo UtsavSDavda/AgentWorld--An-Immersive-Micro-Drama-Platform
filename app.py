@@ -193,7 +193,30 @@ def render_video(session_id):
     prefix = "animatic" if mode == "stills" else "final_render"
     filename = f"{prefix}_{controller.game_name}_{safe_room}_tick{tick}.mp4"
     output_path = os.path.join(OUTPUT_DIR, filename)
-
+    script_path = output_path.rsplit('.', 1)[0] + '.txt'
+    try:
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(f"LOCATION: {room_name}\n")
+            f.write(f"TIME: Tick {tick}\n\n")
+            
+            f.write("SCENE DESCRIPTION:\n")
+            f.write(f"{scene_data['visual']}\n\n")
+            
+            if speakers:
+                f.write("CAST PROFILES:\n")
+                for spk in speakers:
+                    prof = video_logger.get_npc_profile(spk)
+                    persona = prof[0] if prof else "No profile available."
+                    f.write(f"- {spk}: {persona}\n")
+                f.write("\n")
+                
+            f.write("-----------------------------------------\n")
+            for speaker, text, emotion, _ in formatted_script:
+                # We format it exactly how your Fountain parser expects it
+                f.write(f"{speaker}: *{emotion.upper()}* {text.strip()}\n")
+        print(f"📄 Rich Transcript saved to {script_path}")
+    except Exception as e:
+        print(f"⚠️ Failed to save rich transcript: {e}")
     def run_film_job():
         scene_assets = director.prepare_scene_assets(scene_data["visual"], agents, controller.game_name, room_name)
         
@@ -263,11 +286,29 @@ def get_timeline(session_id):
     if not controller: return jsonify({"error": "Invalid session"}), 404
 
     video_logger = controller.logger
-    
-    # Fetch up to the last 100 pinned scenes (chronological)
     timeline_data = video_logger.get_official_timeline(100) 
-    video_logger.close()
     
+    # --- NEW: Inject Profiles and Emotions for Rich Storyboard Downloads ---
+    videomaker = SceneSelector(db=video_logger, director=director, key_terms=[], game_name=controller.game_name)
+    
+    for scene in timeline_data:
+        scene_profiles = {}
+        speakers = set(line['speaker'] for line in scene['script'])
+        
+        # Fetch the personas for everyone in the scene
+        for spk in speakers:
+            prof = video_logger.get_npc_profile(spk)
+            if prof:
+                scene_profiles[spk] = prof[0]
+        
+        scene['profiles'] = scene_profiles
+        
+        # Calculate emotions for every line
+        for line in scene['script']:
+            line['emotion'] = videomaker._detect_emotion_nrc(line['line'])
+    # ----------------------------------------------------------------------
+    
+    video_logger.close()
     return jsonify({"timeline": timeline_data})
 
 @app.route('/game/<session_id>/episode/render', methods=['POST'])
@@ -320,7 +361,20 @@ def render_full_episode(session_id):
                     assigned_wall = directions[len(speakers) % 4]
                     agents.append({"name": speaker, "desc": "A character", "facing": assigned_wall})
                     speakers.add(speaker)
-            
+            # --- NEW: Fetch profiles and store the rich block ---
+            scene_profiles = {}
+            for spk in speakers:
+                prof = video_logger.get_npc_profile(spk)
+                if prof:
+                    scene_profiles[spk] = prof[0]
+                    
+            master_episode_data.append({
+                "tick": tick,
+                "room": room_name,
+                "visual": scene["visual"],
+                "profiles": scene_profiles,
+                "dialogue": formatted_script
+            })
             # --- NEW: Append this scene's formatted script to the master list ---
             master_episode_script.extend(formatted_script)
 
@@ -359,10 +413,24 @@ def render_full_episode(session_id):
             script_path = output_path.rsplit('.', 1)[0] + '.txt'
             try:
                 with open(script_path, "w", encoding="utf-8") as f:
-                    f.write(f"--- FULL EPISODE TRANSCRIPT: {controller.game_name} ---\n\n")
-                    for speaker, line, emotion, _ in master_episode_script:
-                        f.write(f"[{emotion.upper()}] {speaker}: {line.strip()}\n\n")
-                print(f"📄 Master Episode Transcript saved to {script_path}")
+                    f.write(f"=== FULL EPISODE TRANSCRIPT: {controller.game_name} ===\n\n")
+                    for block in master_episode_data:
+                        f.write(f"LOCATION: {block['room']}\n")
+                        f.write(f"TIME: Tick {block['tick']}\n\n")
+                        
+                        f.write("SCENE DESCRIPTION:\n")
+                        f.write(f"{block['visual']}\n\n")
+                        
+                        if block['profiles']:
+                            f.write("CAST PROFILES:\n")
+                            for spk, persona in block['profiles'].items():
+                                f.write(f"- {spk}: {persona}\n")
+                            f.write("\n")
+                            
+                        f.write("-----------------------------------------\n")
+                        for speaker, text, emotion, _ in block['dialogue']:
+                            f.write(f"{speaker}: *{emotion.upper()}* {text.strip()}\n\n")
+                print(f"📄 Master Rich Transcript saved to {script_path}")
             except Exception as e:
                 print(f"⚠️ Failed to save master transcript: {e}")
 

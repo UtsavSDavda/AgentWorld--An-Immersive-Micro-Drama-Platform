@@ -714,17 +714,34 @@
                 data.timeline.forEach((scene, index) => {
                     scriptText += `SCENE ${index + 1}\n`;
                     scriptText += `LOCATION: ${scene.room.toUpperCase()}\n`;
-                    scriptText += `TIME: Tick ${scene.tick}\n`;
+                    scriptText += `TIME: Tick ${scene.tick}\n\n`;
+                    
+                    // --- NEW: Inject Scene Description ---
+                    if (scene.visual) {
+                        scriptText += `SCENE DESCRIPTION:\n${scene.visual}\n\n`;
+                    }
+                    
+                    // --- NEW: Inject Cast Profiles ---
+                    if (scene.profiles && Object.keys(scene.profiles).length > 0) {
+                        scriptText += `CAST PROFILES:\n`;
+                        for (const [spk, persona] of Object.entries(scene.profiles)) {
+                            scriptText += `- ${spk.toUpperCase()}: ${persona}\n`;
+                        }
+                        scriptText += `\n`;
+                    }
+                    
                     scriptText += `-----------------------------------------\n`;
                     
                     if (scene.script && scene.script.length > 0) {
                         scene.script.forEach(line => {
-                            scriptText += `${line.speaker}: ${line.line}\n`;
+                            // --- NEW: Include Emotion ---
+                            const emotion = line.emotion ? `*${line.emotion.toUpperCase()}* ` : "";
+                            scriptText += `${line.speaker}: ${emotion}${line.line}\n`;
                         });
                     } else {
                         scriptText += `(Silent Scene / Action Only)\n`;
                     }
-                    scriptText += `\n`; // Add some spacing between scenes
+                    scriptText += `\n`; 
                 });
 
                 // Create a "Blob" (a chunk of data) to hold our text
