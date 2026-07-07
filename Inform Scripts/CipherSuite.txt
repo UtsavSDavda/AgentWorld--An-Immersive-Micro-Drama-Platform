@@ -1,0 +1,281 @@
+"TheCipherBlackSite" by Utsav
+
+[--- PYTHON INJECTION BACKDOOR ---]
+Forcing is an action out of world applying to one thing and one topic.
+Understand "force [any person] to [text]" as forcing.
+
+Carry out forcing:
+	now the planned-action of the noun is the substituted form of "[the topic understood]";
+	rule succeeds.
+
+[--- UPGRADED NPC SIGHT & STATE DUMP ---]
+Dumping sight is an action out of world applying to nothing.
+Understand "dump sight" as dumping sight.
+
+Carry out dumping sight:
+	say "--- START SIGHT ---[line break]";
+	repeat with observer running through people:
+		if observer is not the player:
+			dump sight for the observer;
+	say "--- END SIGHT ---[line break]";
+	rule succeeds.
+
+To dump sight for (observer - a person):
+	let the-room be the location of the observer;
+	repeat with way running through directions:
+		let destination be the room way from the-room;
+		if destination is a room:
+			say "DATA_SIGHT: [observer] | direction | [way][line break]";
+	repeat with target running through people in the-room:
+		if target is not the observer:
+			if target is not the player:
+				say "DATA_SIGHT: [observer] | person | [target][line break]";
+	repeat with item running through things enclosed by the-room:
+		if item is not a person:
+			if item is not a room:
+				if the observer can see the item:
+					if the holder of the item is not the observer:
+						dump object sight for item seen by observer;
+	repeat with item running through things enclosed by the observer:
+		dump inventory sight for item held by observer.
+
+To dump object sight for (item - a thing) seen by (observer - a person):
+	let state-flag be "basic";
+	let portability-flag be "portable";
+	let lock-flag be "unlocked";
+	if item is scenery:
+		now portability-flag is "scenery";
+	if item is fixed in place:
+		now portability-flag is "fixed";
+	if item is part of something:
+		now portability-flag is "part_of";
+	if item is lockable and item is locked:
+		now lock-flag is "locked";
+	if item is a device and item is switched on:
+		now state-flag is "device_on";
+	if item is a device and item is switched off:
+		now state-flag is "device_off";
+	if item is openable and item is open:
+		now state-flag is "openable_open";
+	if item is openable and item is closed:
+		now state-flag is "openable_closed";
+	say "DATA_SIGHT: [observer] | object | [item] | [state-flag] | [portability-flag] | [lock-flag][line break]".
+
+To dump inventory sight for (item - a thing) held by (observer - a person):
+	let state-flag be "basic";
+	let wear-flag be "carried";
+	if item is worn by the observer:
+		now wear-flag is "worn";
+	if item is a device and item is switched on:
+		now state-flag is "device_on";
+	if item is a device and item is switched off:
+		now state-flag is "device_off";
+	say "DATA_SIGHT: [observer] | inventory | [item] | [state-flag] | [wear-flag] | basic[line break]".
+
+[--- AGENT PROPERTIES ---]
+A person has a truth state called autonomous.
+A person has a text called planned-action.
+A person has a number called stay-counter.
+The current-actor is a person that varies.
+
+[--- INITIALIZE AUTONOMY ---]
+When play begins:
+	repeat with P running through people:
+		if P is not the player: 
+			now the autonomous of P is true;
+			now the planned-action of P is "";
+			now the stay-counter of P is a random number from 1 to 3;
+
+[--- GEOGRAPHY ---]
+The Security Kiosk is a room. 
+The description of the Security Kiosk is "A heavily reinforced guard station. Monitored screens glow faintly, displaying closed-circuit feeds of the facility."
+
+The Server Corridor is north of the Security Kiosk.
+The description of the Server Corridor is "A narrow, chilled hallway lined with routing cables. A heavy hum of electricity fills the air."
+
+The Data Vault is a room.
+The description of the Data Vault is "A sterile, isolated room. The temperature is strictly regulated, housing the facility's most critical hardware."
+
+[--- THE PHYSICS TRAP (PUZZLES & ITEMS) ---]
+The heavy vault door is a door. It is north of the Server Corridor and south of the Data Vault. It is lockable and locked.
+
+The vault key is a thing.
+The vault key unlocks the heavy vault door.
+The lockdown override switch is a device in the Security Kiosk. It is fixed in place. It is switched off.
+The encrypted mainframe is a device in the Server Corridor. It is fixed in place. It is switched off.
+The target hard drive is a thing in the Data Vault.
+
+[--- THE CAST & HIDDEN PERSONAS ---]
+The Analyst is a person in the Security Kiosk.
+The description of the Analyst is "A facility loyalist monitoring the feeds. Mentally, you know the lockdown override switch must be switched on to allow internal network traffic."
+
+The Manager is a person in the Server Corridor. The Manager carries the vault key.
+The description of the Manager is "A nervous middle-manager. Mentally, you are terrified of the Intruder but you hold the vault key needed to unlock the heavy vault door."
+
+The Engineer is a person in the Server Corridor.
+The description of the Engineer is "A systems optimization specialist. Mentally, you know the encrypted mainframe must be switched on to initialize the zero-copy buffer and allow data extraction."
+
+The Insider is a person in the Security Kiosk.
+The description of the Insider is "A mole working for an external contractor. Mentally, you secretly hold the SIMON block cipher sequence needed to decrypt the hard drive once the mainframe is active. You must not blow your cover."
+
+The Intruder is a person in the Server Corridor.
+The description of the Intruder is "A highly aggressive operative. Mentally, your absolute priority is to secure the target hard drive from the Data Vault, but you lack the keys and technical knowledge to get past the heavy vault door."
+
+[--- AGENT BRAIN ---]
+Agent behaviour is a rulebook.
+
+[Movement behaviour]
+Agent behaviour rule:
+	if a random chance of 1 in 5 succeeds:
+		let origin be the location of the current-actor;
+		let way be a random direction;
+		let target be the room way from origin;
+		if target is a room:
+			try the current-actor going way;
+			if the location of the current-actor is target:
+				say "[The current-actor] moves [way] to [target].";
+		rule succeeds;
+[Fallback]
+Agent behaviour rule:
+	say "[The current-actor] waits.";
+	rule succeeds.
+
+[--- HELPER: TEXT TO ACTION ---]
+The execution-success is a truth state that varies.
+
+To attempt to perform (T - text) for (actor - a person):
+	now execution-success is false;
+	if T is "go north":
+		if the room north from the location of the actor is a room:
+			try the actor going north;
+			if execution-success is false:
+				say "DATA_RESULT: [actor] | FAIL | going north | blocked by physics[line break]";
+		otherwise:
+			say "DATA_RESULT: [actor] | FAIL | going north | blocked[line break]";
+	otherwise if T is "go south":
+		if the room south from the location of the actor is a room:
+			try the actor going south;
+			if execution-success is false:
+				say "DATA_RESULT: [actor] | FAIL | going south | blocked by physics[line break]";
+		otherwise:
+			say "DATA_RESULT: [actor] | FAIL | going south | blocked[line break]";
+	otherwise if T is "go east":
+		if the room east from the location of the actor is a room:
+			try the actor going east;
+			if execution-success is false:
+				say "DATA_RESULT: [actor] | FAIL | going east | blocked by physics[line break]";
+		otherwise:
+			say "DATA_RESULT: [actor] | FAIL | going east | blocked[line break]";
+	otherwise if T is "go west":
+		if the room west from the location of the actor is a room:
+			try the actor going west;
+			if execution-success is false:
+				say "DATA_RESULT: [actor] | FAIL | going west | blocked by physics[line break]";
+		otherwise:
+			say "DATA_RESULT: [actor] | FAIL | going west | blocked[line break]";
+	otherwise if T is "wait":
+		try the actor waiting;
+	otherwise if T matches the regular expression "^examine (.*)":
+		resolve the text matching subexpression 1 for the actor to "examine";
+	otherwise if T matches the regular expression "^take (.*)":
+		resolve the text matching subexpression 1 for the actor to "take";
+	otherwise if T matches the regular expression "^drop (.*)":
+		resolve the text matching subexpression 1 for the actor to "drop";
+	otherwise if T matches the regular expression "^switch on (.*)":
+		resolve the text matching subexpression 1 for the actor to "switch on";
+	otherwise if T matches the regular expression "^switch off (.*)":
+		resolve the text matching subexpression 1 for the actor to "switch off";
+	otherwise if T matches the regular expression "^open (.*)":
+		resolve the text matching subexpression 1 for the actor to "open";
+	otherwise if T matches the regular expression "^close (.*)":
+		resolve the text matching subexpression 1 for the actor to "close";
+	otherwise if T matches the regular expression "^unlock (.*)":
+		resolve the text matching subexpression 1 for the actor to "unlock";
+	otherwise:
+		say "DATA_RESULT: [actor] | FAIL | [T] | unknown command[line break]".
+
+To resolve (target-name - text) for (actor - a person) to (cmd - text):
+	let found-something be false;
+	repeat with item running through things enclosed by the location of the actor:
+		if the actor can see the item:
+			[--- THE TRUE CASE-INSENSITIVE FIX ---]
+			if "[item]" matches the regular expression "(?i)^[target-name]$":
+				now found-something is true;
+				execute cmd on item for actor;
+				break;
+	if found-something is false:
+		say "DATA_RESULT: [actor] | FAIL | [cmd] [target-name] | object not found[line break]".
+
+To execute (cmd - text) on (item - a thing) for (actor - a person):
+	now execution-success is false;
+	if cmd is "examine":
+		try the actor examining the item;
+	if cmd is "take":
+		try the actor taking the item;
+	if cmd is "drop":
+		try the actor dropping the item;
+	if cmd is "switch on":
+		try the actor switching on the item;
+	if cmd is "switch off":
+		try the actor switching off the item;
+	if cmd is "open":
+		try the actor opening the item;
+	if cmd is "close":
+		try the actor closing the item;
+	if cmd is "unlock":
+		try the actor unlocking the item with the vault key;
+	if execution-success is false:
+		say "DATA_RESULT: [actor] | FAIL | [cmd] [item] | blocked by physics[line break]".
+
+[--- TRACKING & LOGGING ---]
+After someone (called the NPC) doing something:
+	if the NPC is not the player:
+		now execution-success is true;
+		say "DATA_RESULT: [the NPC] | SUCCESS | [the current action][line break]";
+		let the-target be "none";
+		if the noun is not nothing:
+			now the-target is "[the noun]";
+		say "DATA_EVENT: [the NPC] | [action name part of the current action] | [the-target] | [location of the NPC][line break]".
+
+[--- SIMULATION LOOP ---]
+Advancing is an action applying to nothing.
+Understand "step" or "tick" as advancing.
+
+Carry out advancing:
+	say "--- Simulation Step ---";
+	repeat with item running through people:
+		now the current-actor is the item;
+		if the planned-action of item is not "":
+			[say "[The item] executes plan: [planned-action of item].";]
+			attempt to perform the planned-action of item for the item;
+			now the planned-action of item is "";
+		otherwise if the autonomous of item is true:
+			follow the agent behaviour.
+
+[--- NPC DESCRIPTIONS DUMP ---]
+Dumping agents is an action applying to nothing.
+Understand "dump agents" as dumping agents.
+
+Carry out dumping agents:
+	say "--- BEGIN NPC DATA ---[line break]";
+	repeat with the target running through people:
+		if the target is not the player:
+			say "DATA_NPC: [printed name of the target] | [description of the target][line break]";
+	say "--- END NPC DATA ---[line break]";
+	rule succeeds.
+	
+Every turn:
+	say "--- START DATA ---[line break]";
+	repeat with actor running through people who are not the player:
+		if the actor is in a room:
+			say "DATA_LOC: [actor] | [location of actor][line break]";
+	say "--- END DATA ---[line break]".
+	
+Dumping rooms is an action out of world applying to nothing.
+Understand "dump rooms" as dumping rooms.
+
+Carry out dumping rooms:
+	say "--- START ROOM DATA ---[line break]";
+	repeat with R running through rooms:
+		say "DATA_ROOM: [R] | [description of R][line break]";
+	say "--- END ROOM DATA ---[line break]".

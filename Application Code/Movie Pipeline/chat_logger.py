@@ -689,6 +689,60 @@ class SQLLogger:
         except Exception as e:
             print(f"⚠️ Failed to overwrite narrative arc: {e}")
             return False
+    # ==========================================================
+    # ENGINE GROUND TRUTH METHODS (For EVR Pipeline)
+    # ==========================================================
+
+    def log_engine_data(self, tick, log_type, raw_string):
+        """Saves raw Inform 7 logs directly to the database as Ground Truth."""
+        data = {
+            "session_id": self.session_id,
+            "tick": tick,
+            "log_type": log_type,
+            "log_data": raw_string
+        }
+        try:
+            self.supabase.table('engine_logs').insert(data).execute()
+        except Exception as e:
+            print(f"[!] DB Error saving engine log: {e}")
+
+    def get_room_desc_by_name(self, room_name):
+        """Fetches the static room description for the scenery fallback check."""
+        response = self.supabase.table('room_desc')\
+            .select('description')\
+            .eq('room_name', room_name)\
+            .eq('session_id', self.session_id)\
+            .order('tick', desc=True)\
+            .limit(1).execute()
+            
+        return response.data[0]['description'] if response.data else "Room description not found."
+
+    def get_tick_locations(self, session_id, tick):
+        """Fetches the DATA_LOC dumps for a specific tick."""
+        response = self.supabase.table('engine_logs')\
+            .select('log_data')\
+            .eq('session_id', session_id)\
+            .eq('tick', tick)\
+            .eq('log_type', 'DATA_LOC').execute()
+        return "\n".join([row['log_data'] for row in response.data])
+
+    def get_tick_events(self, session_id, tick):
+        """Fetches the DATA_RESULT dumps (successes and failures)."""
+        response = self.supabase.table('engine_logs')\
+            .select('log_data')\
+            .eq('session_id', session_id)\
+            .eq('tick', tick)\
+            .eq('log_type', 'DATA_RESULT').execute()
+        return "\n".join([row['log_data'] for row in response.data])
+
+    def get_tick_sight(self, session_id, tick):
+        """Fetches the DATA_SIGHT dumps (object states)."""
+        response = self.supabase.table('engine_logs')\
+            .select('log_data')\
+            .eq('session_id', session_id)\
+            .eq('tick', tick)\
+            .eq('log_type', 'DATA_SIGHT').execute()
+        return "\n".join([row['log_data'] for row in response.data])
 
     def close(self):
         pass # Supabase handles connection pooling automatically
