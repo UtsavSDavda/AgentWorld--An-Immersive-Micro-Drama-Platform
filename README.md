@@ -37,17 +37,21 @@ The `AutomatedDirector` translates the text-based simulation into a visual cinem
 The project evaluates the LLM agents through a rigorous, multi-dimensional benchmarking suite, isolating different aspects of their performance.
 
 ### 1. DramaBench Evaluation (`eval.py`)
+
+![alt text](image-1.png)
 This script evaluates the narrative quality of the simulation using `gemini-2.5-pro` over a striding 5-tick window[cite: 1].
 *   **Character Consistency (OOC Rate):** Measures how often an agent breaks character or acts out of character (OOC)[cite: 1]. A lower score indicates better adherence to their persona[cite: 1].
 *   **Logic Consistency (Break Rate):** Evaluates if the agent attempts physical actions that violate the established environmental state[cite: 1].
 *   **Conflict Handling:** Assigns a global weight to the narrative tension, rewarding escalation and twists while penalizing dropped storylines[cite: 1].
 
 ### 2. Direct Entailment & Persona Judge (`nli_benchmark.py`)
+![alt text](image-3.png)
 This script acts as a strict judge using `gemini-2.5-pro` to prevent false positives in agent dialogue[cite: 8].
 *   **Eval 2 (Physical Consistency):** Evaluates whether an agent's dialogue contradicts the absolute physical ground truth of the engine logs (locations, sights, past events)[cite: 8]. It explicitly ignores narrative chat history to prevent hallucination verification, labeling claims as VERIFIED, HALLUCINATED, or N/A[cite: 8].
 *   **Eval 3 (Persona Consistency):** Checks if the dialogue aligns with the speaker's hidden motives and secret knowledge, scoring it as CONSISTENT or INCONSISTENT[cite: 8].
 
 ### 3. Cognitive Adaptation (`stubbornness_test.py`)
+![alt text](image-2.png)
 This evaluation measures the agents' ability to learn from their mistakes within the physics engine[cite: 9].
 *   **Action Tracking:** It parses the `DATA_RESULT` engine logs chronologically to track successful and failed actions[cite: 9].
 *   **Stubbornness Index:** The script specifically monitors if an agent repeats the exact same failed action without changing their approach[cite: 9]. A high "Stubborn Rate" indicates a failure in cognitive adaptation and reasoning[cite: 9].
