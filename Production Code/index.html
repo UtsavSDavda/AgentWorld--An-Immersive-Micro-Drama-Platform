@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jericho Studio Director's Dashboard</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f111a; color: #e1e3ed; padding: 20px; max-width: 1100px; margin: 0 auto; }
+        h1, h2, h3 { margin-top: 0; color: #fff; }
+        
+        .session-bar { background: #181b29; border: 1px solid #2d3248; border-radius: 8px; padding: 15px 20px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+        .session-info { font-size: 0.95em; color: #a0a5ba; }
+        .session-info strong { color: #00d2ff; }
+        
+        .panel { background: #161824; padding: 20px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #262a3d; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+        .flex { display: flex; gap: 12px; flex-wrap: wrap; }
+        
+        input, select, textarea { background: #0d0e17; color: #fff; border: 1px solid #32374e; padding: 10px; border-radius: 6px; outline: none; }
+        input:focus, select:focus, textarea:focus { border-color: #007bff; }
+        
+        button { background: #007bff; color: white; border: none; padding: 10px 18px; cursor: pointer; border-radius: 6px; font-weight: 600; transition: all 0.2s; }
+        button:hover { background: #0056b3; transform: translateY(-1px); }
+        button:disabled { background: #2d3248; color: #6c7293; cursor: not-allowed; transform: none; }
+        
+        .image-gallery img { height: 180px; border-radius: 6px; border: 2px solid #32374e; margin-right: 10px; object-fit: cover; }
+        .script-box { background: #0a0b10; padding: 12px; font-family: "Fira Code", monospace; border-left: 3px solid #007bff; margin: 12px 0; border-radius: 4px; font-size: 0.9em; }
+        
+        .status-badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 0.8em; font-weight: bold; }
+        .badge-calm { background: #10b981; color: #000; }
+        .badge-alert { background: #f59e0b; color: #000; }
+        .badge-panic { background: #ef4444; color: #fff; }
+    </style>
+</head>
+<body>
+
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <h1>🎬 Jericho Studio Director's Dashboard</h1>
+        <button onclick="clearSession()" style="background: #dc3545; font-size: 0.85em;">🔄 Switch Game / Reset Session</button>
+    </div>
+
+    <!-- 0. REVIEWER SETUP (BYOK) -->
+    <div class="panel" style="border-left: 4px solid #10b981;">
+        <h2>🔑 0. Reviewer Setup (BYOK)</h2>
+        <p style="color: #a0a5ba; font-size: 0.9em; margin-top: 0;">Enter your Google API keys. Stored locally in your browser and injected into server headers.</p>
+        <div class="flex">
+            <input type="password" id="geminiKey" placeholder="Gemini API Key (Veo/Flash/Imagen)" style="width: 320px;">
+            <input type="password" id="gcpKey" placeholder="GCP API Key (Text-to-Speech)" style="width: 320px;">
+            <button onclick="saveKeys()" style="background: #10b981;">Save Keys</button>
+        </div>
+        <p id="keyStatus" style="color: #10b981; font-size: 0.9em; display: none; margin-top: 10px;">✅ Keys saved to browser storage!</p>
+    </div>
+
+    <!-- PERSISTENT SESSION STATUS BAR -->
+    <div class="session-bar">
+        <div class="session-info">
+            <span>Status: <strong id="barStatus">No Active Session</strong></span> | 
+            <span>Session ID: <strong id="barSessionId">None</strong></span> | 
+            <span>Current Tick: <strong id="barTick">0</strong></span>
+        </div>
+    </div>
+    
+    <!-- 1. SIMULATION ENGINE -->
+    <div class="panel">
+        <h2>1. Simulation Engine</h2>
+        <div class="flex" style="margin-bottom: 15px; align-items: center;">
+            <input type="text" id="playerName" placeholder="Enter Player Name" value="Director" style="width: 180px;">
+            <select id="gameSelect"><option value="">Loading games...</option></select>
+            <label style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                <input type="checkbox" id="chkClearDb" style="width: 18px; height: 18px;">
+                <span style="color: #ff6b6b; font-weight: bold; font-size: 0.9em;">Wipe Previous Save</span>
+            </label>
+        </div>
+
+        <div class="flex">
+            <button id="btnStart" onclick="startGame()">Start / Load Game</button>
+            <button id="btnStep" onclick="stepGame(1)" disabled>Simulate 1 Turn</button>
+            <button id="btnStep5" onclick="stepGame(5)" disabled>Simulate 5 Turns</button>
+        </div>
+        <p id="simStatus" style="margin-top: 15px; color: #a0a5ba; font-size: 0.9em;">Awaiting game initialization...</p>
+    </div>
+
+    <!-- 1.1 LIVE COGNITIVE MONITOR -->
+    <div class="panel" style="border-left: 4px solid #17a2b8;">
+        <h2>🧠 1.1 Live Cognitive Monitor</h2>
+        <p style="color: #a0a5ba; font-size: 0.9em; margin-top: 0;">Real-time agent Chain-of-Thought objectives, physical blockers, and stress levels.</p>
+        <div id="agentStatesContainer" class="flex" style="gap: 15px;">
+            <p style="color: #666; font-style: italic;">Start simulation to monitor agent cognition...</p>
+        </div>
+    </div>
+    
+    <!-- 1.2 DIRECTOR'S CHAIR -->
+    <div class="panel" style="border-left: 4px solid #e83e8c;">
+        <h2>🌪️ 1.2 The Director's Chair (Inject Plot Twist)</h2>
+        <p style="color: #a0a5ba; font-size: 0.9em; margin-top: 0;">Inject a narrative seed to trigger immediate psychological adaptation in the agents.</p>
+        <div class="flex">
+            <input type="text" id="narrativeSeed" placeholder="e.g., 'A fire breaks out in the kitchen...'" style="width: 400px;" disabled>
+            <button id="btnSeed" onclick="injectSeed()" style="background: #e83e8c;" disabled>Inject Seed</button>
+        </div>
+        <p id="seedStatus" style="margin-top: 10px; font-style: italic; color: #ffc107; font-size: 0.9em;"></p>
+    </div>
+
+    <!-- 1.5 GREEN ROOM -->
+    <div class="panel">
+        <h2>🎭 1.5 Casting & Wardrobe (The Green Room)</h2>
+        <p style="color: #a0a5ba; font-size: 0.9em; margin-top: 0;">Review character appearances. Recasting updates visual plates live without resetting simulation memory.</p>
+        <button id="btnLoadCast" onclick="loadCast()" disabled style="background: #17a2b8; margin-bottom: 15px;">🔍 Refresh Cast Roster</button>
+        <div id="castContainer" class="flex" style="gap: 20px;"><p style="color: #666; font-style: italic;">No characters discovered yet.</p></div>
+    </div>
+
+    <!-- 2. PRE-PRODUCTION -->
+    <div class="panel">
+        <h2>2. Pre-Production (MediaPipe Compositing)</h2>
+        <button id="btnCandidates" onclick="loadCandidates()" disabled>Generate Pre-Viz Candidates</button>
+        <p id="log" style="color: #00d2ff; font-size: 0.9em; margin-top: 10px;"></p>
+        <div id="candidatesContainer"></div>
+    </div>
+
+    <!-- 3. OFFICIAL TIMELINE -->
+    <div class="panel">
+        <h2>3. The Director's Cut (Official Timeline)</h2>
+        <div class="flex">
+            <label for="recapCount" style="align-self: center;">Recap last:</label>
+            <input type="number" id="recapCount" value="3" min="1" max="10" style="width: 60px;">
+            <span style="align-self: center;">events</span>
+            <button id="btnRecap" onclick="generateRecap(this)" disabled style="margin-left: 15px; background: #6f42c1;">🎙️ Generate "Previously On..." Recap</button>
+        </div>
+        <div id="recapContainer" style="margin-top: 20px;"></div>
+    </div>
+
+    <!-- 4. EPISODE COMPILER -->
+    <div class="panel">
+        <h2>4. The Cutting Room Floor (Episode Compiler)</h2>
+        <div class="flex" style="margin-bottom: 15px;">
+            <button onclick="loadTimeline()" style="background: #17a2b8;">🔄 Refresh Storyboard</button>
+            <button id="btnDownloadTimeline" onclick="downloadTimeline()" disabled style="background: #28a745;">💾 Download Storyboard Script</button>
+        </div>
+        <div class="flex" style="margin-bottom: 15px;">
+            <button id="btnCompileAnimatic" onclick="compileEpisode(this, 'stills')" disabled style="background: #f59e0b; color: #000;">🖼️ RENDER ANIMATIC EPISODE</button>
+            <button id="btnCompile" onclick="compileEpisode(this, 'full')" disabled style="background: #ef4444;">🎬 RENDER FULL EPISODE (Veo)</button>
+        </div>
+        <div id="timelineContainer" style="display: flex; overflow-x: auto; gap: 15px; padding-bottom: 15px;"></div>
+        <div id="episodePlayerContainer" style="margin-top: 20px;"></div>
+    </div>
+
+    <!-- 5. ACADEMIC REPRODUCIBILITY -->
+    <div class="panel" style="border-left: 4px solid #6f42c1; background: #131422;">
+        <h2 style="color: #b184f5;">🎓 5. Academic Reproducibility Kit</h2>
+        <p style="color: #a0a5ba; font-size: 0.9em; margin-top: 0;">Download the benchmark suite (DramaBench, NLI Evaluator) alongside your live transcript.</p>
+        <button id="btnDownloadKit" onclick="downloadReviewerKit()" style="background: #6f42c1;" disabled>📦 Download Evaluation Kit (.zip)</button>
+    </div>
+
+    <script>
+        const API_BASE = "http://localhost:5000";
+        let sessionId = localStorage.getItem("active_session_id") || "";
+        let currentTick = parseInt(localStorage.getItem("active_tick")) || 0;
+        let currentGame = localStorage.getItem("active_game") || "";
+
+        window.onload = async function() {
+            document.getElementById("geminiKey").value = localStorage.getItem("geminiKey") || "";
+            document.getElementById("gcpKey").value = localStorage.getItem("gcpKey") || "";
+            
+            await fetchGamesList();
+            
+            if (sessionId) {
+                updateSessionBar(true);
+                unlockDashboardUI();
+                await loadCast();
+                await loadTimeline();
+            }
+        };
+
+        function saveKeys() {
+            localStorage.setItem("geminiKey", document.getElementById("geminiKey").value.trim());
+            localStorage.setItem("gcpKey", document.getElementById("gcpKey").value.trim());
+            const status = document.getElementById("keyStatus");
+            status.style.display = "block";
+            setTimeout(() => status.style.display = "none", 3000);
+        }
+
+        function getHeaders() {
+            return {
+                'Content-Type': 'application/json',
+                'X-Gemini-Key': localStorage.getItem("geminiKey") || "",
+                'X-GCP-Key': localStorage.getItem("gcpKey") || ""
+            };
+        }
+
+        function getAuthHeaders() {
+            return {
+                'X-Gemini-Key': localStorage.getItem("geminiKey") || "",
+                'X-GCP-Key': localStorage.getItem("gcpKey") || ""
+            };
+        }
+
+        async function fetchGamesList() {
+            try {
+                const res = await fetch(`${API_BASE}/games`, { headers: getAuthHeaders() });
+                const data = await res.json();
+                const select = document.getElementById("gameSelect");
+                select.innerHTML = "";
+                
+                if (!data.available_games || data.available_games.length === 0) {
+                    select.innerHTML = `<option value="">No .z8 games found!</option>`;
+                    document.getElementById("btnStart").disabled = true;
+                    return;
+                }
+
+                data.available_games.forEach(game => {
+                    const isSelected = game === currentGame ? "selected" : "";
+                    select.innerHTML += `<option value="${game}" ${isSelected}>${game}</option>`;
+                });
+            } catch (e) { 
+                document.getElementById("gameSelect").innerHTML = `<option value="">Error connecting to API</option>`;
+            }
+        }
+
+        function updateSessionBar(isActive) {
+            document.getElementById("barStatus").innerText = isActive ? "Active" : "Inactive";
+            document.getElementById("barStatus").style.color = isActive ? "#10b981" : "#ef4444";
+            document.getElementById("barSessionId").innerText = sessionId || "None";
+            document.getElementById("barTick").innerText = currentTick;
+        }
+
+        function unlockDashboardUI() {
+            document.getElementById("btnStep").disabled = false;
+            document.getElementById("btnStep5").disabled = false;
+            document.getElementById("btnCandidates").disabled = false;
+            document.getElementById("btnRecap").disabled = false;
+            document.getElementById("narrativeSeed").disabled = false;
+            document.getElementById("btnSeed").disabled = false;
+            document.getElementById("btnLoadCast").disabled = false;
+            document.getElementById("btnDownloadKit").disabled = false;
+        }
+
+        function clearSession() {
+            localStorage.removeItem("active_session_id");
+            localStorage.removeItem("active_tick");
+            localStorage.removeItem("active_game");
+            sessionId = "";
+            currentTick = 0;
+            currentGame = "";
+            location.reload();
+        }
+
+        async function startGame() {
+            const gameFile = document.getElementById("gameSelect").value;
+            const playerName = document.getElementById("playerName").value || "Director";
+            const clearDb = document.getElementById("chkClearDb").checked;
+            const startBtn = document.getElementById("btnStart");
+            
+            if (!gameFile) return;
+            startBtn.disabled = true;
+
+            try {
+                const res = await fetch(`${API_BASE}/game/start`, {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: JSON.stringify({ game_file: gameFile, username: playerName, clear_db: clearDb }) 
+                });
+                
+                if (!res.ok) throw new Error("Failed to start session");
+                
+                const data = await res.json();
+                sessionId = data.session_id;
+                currentTick = data.tick;
+                currentGame = gameFile;
+                
+                localStorage.setItem("active_session_id", sessionId);
+                localStorage.setItem("active_tick", currentTick);
+                localStorage.setItem("active_game", currentGame);
+                
+                updateSessionBar(true);
+                unlockDashboardUI();
+                document.getElementById("simStatus").innerText = `Active Session initialized for ${playerName}.`;
+                
+                await loadCast();
+            } catch (e) { 
+                alert(`Error starting game: ${e.message}`); 
+            } finally {
+                startBtn.disabled = false;
+            }
+        }
+
+        async function stepGame(turns=1) {
+            document.getElementById("simStatus").innerText = `Simulating agent decisions...`;
+            try {
+                for(let i=0; i<turns; i++) {
+                    const res = await fetch(`${API_BASE}/game/${sessionId}/step`, { 
+                        method: 'POST', 
+                        headers: getHeaders() 
+                    });
+                    const data = await res.json();
+                    currentTick = data.tick;
+                    localStorage.setItem("active_tick", currentTick);
+                    
+                    if (data.agent_states) {
+                        renderAgentStates(data.agent_states);
+                    }
+                }
+                updateSessionBar(true);
+                document.getElementById("simStatus").innerText = `Simulation advanced to Tick ${currentTick}`;
+                await loadCast();
+            } catch(e) {
+                document.getElementById("simStatus").innerText = `❌ Error during simulation step.`;
+            }
+        }
+
+        function renderAgentStates(states) {
+            const container = document.getElementById("agentStatesContainer");
+            container.innerHTML = "";
+            
+            for (const [agentName, state] of Object.entries(states)) {
+                let badgeClass = "badge-calm";
+                let upperClass = (state.stress || "").toUpperCase();
+                if (upperClass.includes("PANIC")) badgeClass = "badge-panic";
+                else if (upperClass.includes("ALERT") || upperClass.includes("ELEVATED")) badgeClass = "badge-alert";
+
+                container.innerHTML += `
+                    <div style="background: #0d0e17; padding: 15px; border-radius: 8px; border: 1px solid #262a3d; width: 260px;">
+                        <h3 style="margin: 0 0 10px 0; color: #17a2b8;">👤 ${agentName}</h3>
+                        <p style="margin: 5px 0; font-size: 0.85em;"><b>📍 Location:</b> ${state.room}</p>
+                        <p style="margin: 8px 0; font-size: 0.85em;"><b>🎯 Objective:</b><br><span style="color: #ccc;">${state.objective}</span></p>
+                        <p style="margin: 8px 0; font-size: 0.85em; color: #ff6b6b;"><b>🚧 Blocker:</b><br>${state.blocker}</p>
+                        <div class="status-badge ${badgeClass}" style="margin-top: 10px;">STRESS: ${state.stress}</div>
+                    </div>
+                `;
+            }
+        }
+
+        async function injectSeed() {
+            const seedText = document.getElementById("narrativeSeed").value;
+            const statusText = document.getElementById("seedStatus");
+            const btn = document.getElementById("btnSeed");
+
+            if (!seedText) return;
+            btn.disabled = true;
+            statusText.innerText = "Intercepting agent cognitive frames...";
+
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/orchestrate`, {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: JSON.stringify({ seed: seedText })
+                });
+                const data = await res.json();
+                statusText.innerText = data.error ? `❌ ${data.error}` : `✅ Seed injected! Click 'Simulate 1 Turn' to see reaction.`;
+                document.getElementById("narrativeSeed").value = ""; 
+            } catch (error) {
+                statusText.innerText = "❌ Server communication error.";
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function loadCast() {
+            const container = document.getElementById("castContainer");
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/cast`, { headers: getAuthHeaders() });
+                const data = await res.json();
+                
+                if (!data.cast || data.cast.length === 0) {
+                    container.innerHTML = `<p style="color: #6c7293; font-style: italic;">No characters discovered yet. Step the game forward!</p>`;
+                    return;
+                }
+
+                let html = "";
+                data.cast.forEach(npc => {
+                    const cacheBuster = Date.now();
+                    const imgSrc = npc.image_url ? `${API_BASE}${npc.image_url}&t=${cacheBuster}` : '';
+                    const imgTag = npc.image_url 
+                        ? `<img id="img_${npc.name}" src="${imgSrc}" style="width:100%; height:160px; object-fit:cover; border-radius:6px; margin-bottom:10px; border: 1px solid #32374e;">` 
+                        : `<div style="height:160px; background:#181b29; display:flex; align-items:center; justify-content:center; margin-bottom:10px; border-radius:6px; color:#6c7293;">No Image</div>`;
+                        
+                    html += `
+                    <div style="background: #0d0e17; padding: 15px; border-radius: 8px; width: 220px; border: 1px solid #262a3d;">
+                        <h3 style="margin: 0 0 10px 0; color: #ffc107; font-size: 1.1em;">${npc.name}</h3>
+                        ${imgTag}
+                        <textarea id="prompt_${npc.name}" rows="3" style="width: 100%; box-sizing: border-box; font-size: 0.8em; margin-bottom: 10px;">${npc.appearance}</textarea>
+                        
+                        <div style="display: flex; gap: 6px;">
+                            <button id="btn_recast_${npc.name}" onclick="recastAgent('${npc.name}')" style="flex: 1; background: #6f42c1; font-size: 0.8em; padding: 8px;">✨ AI</button>
+                            <label for="upload_${npc.name}" style="flex: 1; background: #10b981; color: white; text-align: center; padding: 8px; border-radius: 6px; font-weight: bold; font-size: 0.8em; cursor: pointer;">📸 Upload</label>
+                            <input type="file" id="upload_${npc.name}" style="display: none;" accept="image/*" onchange="uploadAgentImage('${npc.name}', this)">
+                        </div>
+                    </div>`;
+                });
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<p style="color: #ef4444;">Failed to load roster.</p>`;
+            }
+        }
+
+        async function recastAgent(npcName) {
+            const customPrompt = document.getElementById(`prompt_${npcName}`).value;
+            const btn = document.getElementById(`btn_recast_${npcName}`);
+            btn.innerText = "⏳ In Queue...";
+            btn.disabled = true;
+
+            try {
+                await fetch(`${API_BASE}/game/${sessionId}/recast`, {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: JSON.stringify({ npc_name: npcName, custom_prompt: customPrompt })
+                });
+                
+                const poll = setInterval(async () => {
+                    const res = await fetch(`${API_BASE}/game/${sessionId}/cast`, { headers: getAuthHeaders() });
+                    const data = await res.json();
+                    
+                    const npc = data.cast.find(n => n.name === npcName);
+                    
+                    if (npc && npc.appearance === customPrompt) {
+                        clearInterval(poll);
+                        
+                        const imgElem = document.getElementById(`img_${npcName}`);
+                        if (imgElem) {
+                            imgElem.src = `${API_BASE}${npc.image_url}&t=${Date.now()}`;
+                        } else {
+                            await loadCast();
+                        }
+                        
+                        btn.innerText = "✅ Done";
+                        setTimeout(() => { btn.innerText = "✨ AI"; btn.disabled = false; }, 2500);
+                    }
+                }, 2500); 
+                
+            } catch (e) {
+                alert("Recast request failed to queue.");
+                btn.innerText = "❌ Failed";
+                setTimeout(() => { btn.innerText = "✨ AI"; btn.disabled = false; }, 2500);
+            }
+        }
+
+        async function uploadAgentImage(npcName, fileInput) {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append("image", file);
+            formData.append("npc_name", npcName);
+
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/upload_cast_image`, {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: formData 
+                });
+                const data = await res.json();
+                if (data.image_url) {
+                    const imgElem = document.getElementById(`img_${npcName}`);
+                    if (imgElem) imgElem.src = `${API_BASE}${data.image_url}&t=${Date.now()}`;
+                }
+            } catch (e) {
+                alert("Image upload failed.");
+            }
+        }
+
+        async function loadCandidates() {
+            const container = document.getElementById("candidatesContainer");
+            const log = document.getElementById("log");
+            document.getElementById("btnCandidates").disabled = true;
+            log.innerText = "Processing MediaPipe compositing pipeline...";
+            
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/candidates`, {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: JSON.stringify({}) 
+                });
+                const data = await res.json();
+                log.innerText = "Pre-Viz Candidate extraction complete!";
+                
+                let html = "";
+                data.candidates.forEach(scene => {
+                    let imgTags = scene.images ? Object.values(scene.images).map(url => `<img src="${url}">`).join("") : '';
+                    let scriptTags = scene.script.map(line => `<div><b>${line.speaker}:</b> ${line.line}</div>`).join("");
+                    const safeRoom = scene.room.replace(/'/g, "\\'");
+
+                    html += `
+                    <div class="panel" style="background:#0d0e17; margin-top: 15px;">
+                        <h3>Room: ${scene.room} (Tick ${scene.tick}) | Score: ${scene.score.toFixed(1)}</h3>
+                        <div class="image-gallery">${imgTags}</div>
+                        <div class="script-box">${scriptTags}</div>
+                        <div class="flex">
+                            <button onclick="triggerRender(${scene.tick}, '${safeRoom}', this, 'stills')" style="background: #17a2b8;">🖼️ Generate Animatic</button>
+                            <button onclick="triggerRender(${scene.tick}, '${safeRoom}', this, 'full')">🎬 Render Veo Video</button>
+                            <button onclick="addToTimeline(${scene.tick}, '${safeRoom}', this)" style="background: #10b981;">📌 Add to Timeline</button>
+                        </div>
+                    </div>`;
+                });
+                container.innerHTML = html;
+            } catch (e) {
+                log.innerText = "❌ Failed to load pre-viz candidates.";
+            } finally {
+                document.getElementById("btnCandidates").disabled = false;
+            }
+        }
+
+        async function triggerRender(tick, room, btn, mode = 'full') {
+            btn.disabled = true;
+            btn.innerText = "⏳ Queued...";
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/render`, {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: JSON.stringify({ tick: tick, room: room, mode: mode })
+                });
+                const data = await res.json();
+                const expectedFilename = data.video_filename;
+                
+                const poll = setInterval(async () => {
+                    const statusRes = await fetch(`${API_BASE}/render_status/${expectedFilename}`, { headers: getAuthHeaders() });
+                    const statusData = await statusRes.json();
+                    
+                    if (statusData.status === "done") {
+                        clearInterval(poll);
+                        btn.outerHTML = `
+                            <div style="margin-top: 10px; width: 100%;">
+                                <video width="100%" controls autoplay style="border-radius: 6px;">
+                                    <source src="${API_BASE}${statusData.video_url}" type="video/mp4">
+                                </video>
+                            </div>`;
+                    }
+                }, 4000);
+            } catch (e) {
+                btn.innerText = "❌ Render Failed";
+            }
+        }
+
+        async function addToTimeline(tick, room, btn) {
+            btn.disabled = true;
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/timeline/add`, {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: JSON.stringify({ tick: tick, room: room })
+                });
+                if (res.ok) {
+                    btn.innerText = "✅ Pinned";
+                    await loadTimeline();
+                }
+            } catch (e) {
+                btn.innerText = "❌ Failed";
+            }
+        }
+
+        async function loadTimeline() {
+            const container = document.getElementById("timelineContainer");
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/timeline`, { headers: getAuthHeaders() });
+                const data = await res.json();
+                
+                if (!data.timeline || data.timeline.length === 0) {
+                    container.innerHTML = "<p style='color:#f59e0b;'>Timeline is empty. Pin scenes from Pre-Viz above!</p>";
+                    document.getElementById("btnCompile").disabled = true;
+                    document.getElementById("btnCompileAnimatic").disabled = true;
+                    document.getElementById("btnDownloadTimeline").disabled = true;
+                    return;
+                }
+                
+                document.getElementById("btnCompile").disabled = false;
+                document.getElementById("btnCompileAnimatic").disabled = false;
+                document.getElementById("btnDownloadTimeline").disabled = false;
+                
+                let html = "";
+                data.timeline.forEach((scene, index) => {
+                    let snippet = scene.script.length > 0 ? scene.script[0].line.substring(0, 35) + "..." : "Silent scene";
+                    html += `
+                    <div style="min-width: 220px; background: #0d0e17; padding: 12px; border-radius: 6px; border-left: 4px solid #ef4444; position: relative;">
+                        <h4 style="margin: 0 0 5px 0;">Scene ${index + 1}</h4>
+                        <div style="font-size: 0.8em; color: #a0a5ba;">
+                            <b>Tick:</b> ${scene.tick}<br>
+                            <b>Room:</b> ${scene.room}<br>
+                            <b>Line:</b> <i>"${snippet}"</i>
+                        </div>
+                    </div>`;
+                });
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = "Failed to load timeline.";
+            }
+        }
+
+        async function compileEpisode(btn, mode = 'full') {
+            btn.disabled = true;
+            btn.innerText = "⏳ Compiling...";
+            try {
+                const res = await fetch(`${API_BASE}/game/${sessionId}/episode/render`, {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: JSON.stringify({ mode: mode })
+                });
+                const data = await res.json();
+                const expectedFilename = data.video_filename;
+                
+                const poll = setInterval(async () => {
+                    const statusRes = await fetch(`${API_BASE}/render_status/${expectedFilename}`, { headers: getAuthHeaders() });
+                    const statusData = await statusRes.json();
+                    
+                    if (statusData.status === "done") {
+                        clearInterval(poll);
+                        btn.disabled = false;
+                        btn.innerText = "✅ Episode Ready!";
+                        document.getElementById("episodePlayerContainer").innerHTML = `
+                            <div style="background: #000; padding: 15px; border-radius: 8px; border: 2px solid #10b981;">
+                                <video width="100%" controls autoplay style="border-radius: 6px;">
+                                    <source src="${API_BASE}${statusData.video_url}" type="video/mp4">
+                                </video>
+                            </div>`;
+                    }
+                }, 6000);
+            } catch (e) {
+                btn.innerText = "❌ Failed";
+                btn.disabled = false;
+            }
+        }
+
+        function downloadReviewerKit() {
+            window.location.href = `${API_BASE}/game/${sessionId}/export_eval_kit`;
+        }
+    </script>
+</body>
+</html>
