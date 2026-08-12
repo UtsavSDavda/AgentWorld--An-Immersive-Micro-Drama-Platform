@@ -1,5 +1,6 @@
 # GROUNDED: Partitioning Creative Agency Between LLM Storytellers and a Deterministic World Engine
 
+![Project Architecture](architecturediagram.png)
 ## Project Overview
 
 This project is a comprehensive framework for running, visualizing, and evaluating LLM-driven autonomous agents within interactive fiction environments. It combines a text-based simulation engine with advanced video generation and a multi-tiered evaluation suite to assess agent cognition, narrative consistency, and physical logic.
